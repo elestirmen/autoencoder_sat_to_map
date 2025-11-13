@@ -98,7 +98,7 @@ flowchart TD
     B --> C[📁 Parça Klasörü<br/>bolunmus/&lt;harita&gt;/]
     
     subgraph Eğitim["🎓 Eğitim (Opsiyonel, tf.data)"]
-        D1[🖼️ Yan Yana Veri<br/>sol:girdi | sağ:hedef] --> D2[📊 tf.data ile yükle<br/>ve ikiye böl]
+        D1[🖼️ Yan Yana Veri<br/>sol:girdi, sağ:hedef] --> D2[📊 tf.data ile yükle<br/>ve ikiye böl]
         D2 --> D3[🧠 Otoenkoder Eğitim<br/>Keras/ELU/Dropout]
         D3 --> D4[💾 Model Kaydı .h5]
     end
