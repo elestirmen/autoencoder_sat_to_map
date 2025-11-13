@@ -73,12 +73,17 @@ AutoEncoder_pix2pix/
 │
 ├── 📂 bolunmus/                           # Üretilen karolar
 │   └── <harita>/                          # Her harita için alt klasör
+│       └── (goruntu bolme_beta.py için: bolunmus/bolunmus/)
 │
 ├── 📂 modeller/                           # Eğitilmiş Keras modelleri (.h5)
 │
-├── 📂 ana_haritalar/                       # Birleştirilmiş mozaik çıktıları
+├── 📂 ana_haritalar/                       # Birleştirilmiş mozaik çıktıları (.jpg)
 │
 ├── 📂 georefli/                           # Jeoreferanslı GeoTIFF çıktıları
+│   ├── harita/                            # (georef_gpt-ertugrul.py için)
+│   └── harita_temp/                       # (georef_gpt-ertugrul.py için, ara çıktı)
+│
+├── 📂 c:/d_surucusu/parcalar/              # Geçici parça çıktıları (çıkarım sırasında)
 │
 └── 📂 deleted/                            # Arşivlenmiş eski scriptler
 ```
@@ -188,9 +193,15 @@ Büyük `.tif` ortofoto/uydu görselini karolara bölün.
 python "goruntu bolme.py"
 ```
 
-**Çıktı:** `bolunmus/<harita>/...jpg`
+**Çıktılar:**
+- `goruntu bolme.py`: `bolunmus/<harita>_goruntu<numara>_g.jpg`
+- `goruntu bolme_beta.py`: `bolunmus/bolunmus/<harita>_goruntu<numara>_g.jpg` (⚠️ **Not:** Çift klasör yapısı kullanılıyor)
 
-> **Not:** Bindirme (genişleme) pikselleri birleştirme aşamasında içerden kırpılır, böylece dikiş izleri azaltılır.
+**Parametreler:**
+- `goruntu bolme.py`: `frame_size=544`, `genisletme=32`
+- `goruntu bolme_beta.py`: `frame_size=512`, `genisletme=32`
+
+> **Not:** Bindirme (genişleme) pikselleri birleştirme aşamasında içerden kırpılır, böylece dikiş izleri azaltılır. Çıkarım scriptlerinde bindirme kırpma değeri **16 piksel** olarak ayarlanmıştır.
 
 ---
 
@@ -224,11 +235,22 @@ Scriptler bu görüntüyü runtime'da ikiye böler, 544×544'e yeniden boyutland
    - Sıfırdan eğitim için: `model = load_model("son_model.h5")` satırını yoruma alın
    - Devam eğitim için: Bu satırı aktif tutun
 
+**Varsayılan Parametreler:**
+- **Batch size:** 16
+- **Epochs:** 21
+- **Train/Val Split:** %80/%20 (kod içinde `split_at = int(len(all_image_paths) * 0.8)`)
+- **Optimizer:** Adam (learning rate: 0.0005)
+- **Loss:** MSE
+
 **Çalıştırma:**
 
 ```powershell
 python "autoencoder_dinamik_bellek_dosyadan_okuma_tf.data_renkli.py"
 ```
+
+**Çıktılar:**
+- `son_model.h5`: Son eğitilmiş model
+- Epoch bazlı checkpoint'ler: `_<tarih>_model_f<filtre>_k<kernel>_epoch_<epoch>_<activation>_<strides>_.h5`
 
 #### 2.2. Gri/Tek Kanal Eğitim (3→1 veya 1→1)
 
@@ -241,11 +263,18 @@ python "autoencoder_dinamik_bellek_dosyadan_okuma_tf.data_renkli.py"
    all_image_paths = "C:\\d_surucusu\\satmap\\output_full\\" + ...
    ```
 
-2. Opsiyonel histogram eşitleme: `tensorflow-addons` ile `tfa.image.equalize`
+2. **Histogram eşitleme:** `tensorflow-addons` ile `tfa.image.equalize` aktif olarak kullanılıyor (giriş görüntülerinde)
 
 3. Varsayılan model: `create_advanced_autoencoder(...)` (1 kanal çıktı)
 
 4. Devam eğitimi için: `model = load_model("son_model.h5")` satırını kontrol edin
+
+**Varsayılan Parametreler:**
+- **Batch size:** 8
+- **Epochs:** 20
+- **Train/Val Split:** %90/%10 (kod içinde `split_at = int(len(all_image_paths) * 0.9)`)
+- **Optimizer:** Adam (learning rate: 0.001)
+- **Loss:** MSE
 
 **Çalıştırma:**
 
@@ -255,7 +284,7 @@ python "autoencoder_dinamik_bellek_dosyadan_okuma_tf.data_3_kanal_to_1_kanal.py"
 
 **Çıktılar:**
 - `son_model.h5`: Son eğitilmiş model
-- Epoch bazlı checkpoint'ler
+- Epoch bazlı checkpoint'ler: `_<tarih>_model_f<filtre>_k<kernel>_epoch_<epoch>_<activation>_<strides>_.h5`
 
 ---
 
@@ -290,14 +319,16 @@ python "harita_uretici_beta_gpt_hizli_3_kanal_to_1_kanal.py"
 **İşlem Adımları:**
 
 1. Script, parçaları model(ler) ile tahmin eder
-2. Bindirme kenarlarını içerden kırpar
+2. Bindirme kenarlarını içerden kırpar (**16 piksel** her kenardan)
 3. Satır-sütun halinde birleştirir
-4. Çıktı: `ana_haritalar/ana_harita_<harita>_<model>.jpg`
+4. Ara çıktı: `c:/d_surucusu/parcalar/<harita>_<model>/goruntu_<dosya>.jpg`
+5. Final çıktı: `ana_haritalar/ana_harita_<harita>_<model>.jpg`
 
 **Önemli Notlar:**
 
-- **Grid ölçüleri:** Bazı script'lerde sabit başlangıç değeri ve karekök tabanlı otomatik kare grid modu bulunur. Parça sayınız kare sayı değilse `frame_adedi_x/y` değerlerini manuel ayarlayın.
-- **Renk dönüşümü:** Renkli akışta OpenCV BGR sırası ile RGB karışabilir; gerekli dönüşümler script'te yapılmıştır.
+- **Grid ölçüleri:** Script'lerde sabit başlangıç değeri (`frame_adedi_x`, `frame_adedi_y`) ve karekök tabanlı otomatik kare grid modu bulunur. Parça sayınız kare sayı değilse script içindeki `frame_adedi_x/y` değerlerini manuel ayarlayın (ör. ürgüp için: `frame_adedi_x = 44`, `frame_adedi_y = 60`).
+- **Renk dönüşümü:** Renkli akışta OpenCV BGR sırası ile RGB karışabilir; gerekli dönüşümler script'te yapılmıştır (`cv2.COLOR_BGR2RGB`).
+- **Ara çıktı klasörü:** Geçici parça çıktıları `c:/d_surucusu/parcalar/` klasörüne kaydedilir. Bu klasörün var olduğundan emin olun veya script'i düzenleyerek farklı bir yol kullanın.
 
 ---
 
@@ -307,9 +338,14 @@ Mozaiklenmiş çıktı `.jpg` dosyalarını bir referans GeoTIFF'in CRS ve trans
 
 #### Yapılandırma
 
-1. Referans raster yolunu script içinde ayarlayın:
+1. **Referans raster yolunu script içinde ayarlayın:**
    ```python
-   # Örnek: ana_harita_urgup_30_cm__Georefference_utm.tif
+   # georef_gpt.py ve georef_gpt-ertugrul.py içinde:
+   georasterref = rasterio.open("ana_harita_urgup_30_cm__Georefference_utm.tif")
+   # Diğer seçenekler yorum satırı olarak mevcuttur:
+   # - ana_harita_karlik_30_cm_bingmap_Georeferans.tif
+   # - urgup_gmap_30_cm_georeferans.tif
+   # - karlik_30_cm_bingmap_utm_georefference.tif
    ```
 
 #### Çalıştırma
@@ -320,7 +356,17 @@ python "georef_gpt.py"
 python "georef_gpt-ertugrul.py"
 ```
 
-**Çıktı:** `georefli/` klasörü altında `.tif` dosyaları (LZW veya JPEG sıkıştırma seçenekleri script'te mevcuttur)
+**Çıktılar:**
+
+- **georef_gpt.py:**
+  - Ara çıktı: `georefli/harita/<harita>_geo.tif` (LZW sıkıştırma)
+  - Final çıktı: `georefli/<harita>_UTM_geo_r.tif` (JPEG sıkıştırma)
+
+- **georef_gpt-ertugrul.py:**
+  - Ara çıktı: `georefli/harita_temp/<harita>_geo.tif` (LZW sıkıştırma)
+  - Final çıktı: `georefli/harita/<harita>_UTM_geo_r.tif` (JPEG sıkıştırma)
+
+**Not:** Script'ler `ana_haritalar/` klasöründeki tüm `.jpg` dosyalarını otomatik olarak işler.
 
 ---
 
@@ -334,11 +380,17 @@ python "georef_gpt-ertugrul.py"
 | **Bindirme payı** | `goruntu bolme*.py` | `genisletme` (piksel cinsinden) |
 | **Eğitim verisi kökü** | Eğitim script'leri | `all_image_paths` değişkeni |
 | **Giriş/çıkış kanalları** | Model fonksiyonları | 3→3, 3→1, 1→1 |
-| **Batch size** | Eğitim script'leri | GPU VRAM'a göre ayarlayın |
-| **Optimizer & Loss** | Eğitim script'leri | Script'in alt bölümünde |
+| **Batch size** | Eğitim script'leri | Renkli: 16, Gri: 8 (GPU VRAM'a göre ayarlayın) |
+| **Epochs** | Eğitim script'leri | Renkli: 21, Gri: 20 |
+| **Train/Val Split** | Eğitim script'leri | Renkli: %80/%20, Gri: %90/%10 |
+| **Optimizer & Loss** | Eğitim script'leri | Adam optimizer (Renkli: lr=0.0005, Gri: lr=0.001), MSE loss |
 | **Model yükleme** | Eğitim script'leri | `model = load_model("son_model.h5")` (devam eğitim için) |
+| **Bindirme kırpma** | Çıkarım script'leri | `genisleme = 16` piksel (her kenardan) |
+| **Grid boyutları** | Çıkarım script'leri | `frame_adedi_x`, `frame_adedi_y` (manuel veya otomatik karekök) |
 | **Çıkarım model klasörü** | Çıkarım script'leri | `modeller/` |
-| **Çıktı klasörleri** | Script'ler | `ana_haritalar/`, `georefli/` |
+| **Ara çıktı klasörü** | Çıkarım script'leri | `c:/d_surucusu/parcalar/` (geçici parça çıktıları) |
+| **Final çıktı klasörleri** | Script'ler | `ana_haritalar/`, `georefli/` |
+| **Referans raster** | Jeoreferans script'leri | Script içinde hardcoded, değiştirilmesi gerekir |
 
 ### Öneri
 
@@ -439,7 +491,9 @@ Yolları ve parametreleri merkezi bir `config.yaml` dosyasına almak taşınabil
 python "goruntu bolme.py"
 ```
 
-**Çıktı:** `bolunmus/<harita>/...jpg`
+**Çıktı:** 
+- `goruntu bolme.py`: `bolunmus/<harita>_goruntu<numara>_g.jpg`
+- `goruntu bolme_beta.py`: `bolunmus/bolunmus/<harita>_goruntu<numara>_g.jpg` (⚠️ çift klasör)
 
 ---
 
@@ -461,7 +515,9 @@ python "autoencoder_dinamik_bellek_dosyadan_okuma_tf.data_renkli.py"
 python "harita_uretici_beta_gpt_hizli.py"
 ```
 
-**Çıktı:** `ana_haritalar/ana_harita_<harita>_<model>.jpg`
+**Çıktılar:**
+- Ara çıktı: `c:/d_surucusu/parcalar/<harita>_<model>/goruntu_<dosya>.jpg`
+- Final çıktı: `ana_haritalar/ana_harita_<harita>_<model>.jpg`
 
 ---
 
@@ -472,7 +528,9 @@ python "harita_uretici_beta_gpt_hizli.py"
 python "georef_gpt.py"
 ```
 
-**Çıktı:** `georefli/<harita>_<model>.tif`
+**Çıktılar:**
+- `georef_gpt.py`: `georefli/<harita>_UTM_geo_r.tif`
+- `georef_gpt-ertugrul.py`: `georefli/harita/<harita>_UTM_geo_r.tif`
 
 ---
 
