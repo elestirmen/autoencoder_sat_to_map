@@ -19,6 +19,42 @@ from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Any
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
+import re
+
+# Progress bar için tqdm
+try:
+    from tqdm import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
+    # Basit progress bar fallback
+    class tqdm:
+        def __init__(self, iterable=None, total=None, desc=None, unit=None, ncols=None):
+            self.iterable = iterable
+            self.total = total
+            self.desc = desc
+            self.unit = unit
+            self.n = 0
+        
+        def __iter__(self):
+            if self.desc:
+                print(f"{self.desc}...", end="", flush=True)
+            return iter(self.iterable) if self.iterable else range(self.total)
+        
+        def __enter__(self):
+            return self
+        
+        def __exit__(self, *args):
+            if self.desc:
+                print(" ✓")
+        
+        def update(self, n=1):
+            self.n += n
+            if self.desc and self.total:
+                print(f"\r{self.desc}... {self.n}/{self.total}", end="", flush=True)
+        
+        def set_description(self, desc):
+            self.desc = desc
 
 # OpenCV için maksimum görüntü piksel limitini ayarla
 os.environ["OPENCV_IO_MAX_IMAGE_PIXELS"] = str(pow(2, 40))
@@ -54,9 +90,90 @@ except ImportError:
 class ImageProcessor:
     """Görüntü işleme sınıfı - bölme, birleştirme ve jeoreferanslama işlemleri."""
     
-    def __init__(self):
-        """ImageProcessor sınıfını başlatır."""
+    def __init__(self, reference_dir: Optional[str] = None):
+        """
+        ImageProcessor sınıfını başlatır.
+        
+        Args:
+            reference_dir: Referans raster dosyalarının bulunduğu dizin
+        """
         self.supported_formats = ['.tif', '.tiff', '.jpg', '.jpeg', '.png']
+        self.reference_dir = reference_dir or "."
+    
+    def find_reference_raster(self, image_filename: str, reference_dir: Optional[str] = None) -> Optional[str]:
+        """
+        Görüntü dosya adına göre uygun referans raster'ı bulur.
+        
+        Args:
+            image_filename: Görüntü dosya adı (örn: "karlik_30_cm_bingmap_utm.tif")
+            reference_dir: Referans dosyalarının bulunduğu dizin
+            
+        Returns:
+            Bulunan referans raster yolu veya None
+        """
+        if reference_dir is None:
+            reference_dir = self.reference_dir
+        
+        if not os.path.exists(reference_dir):
+            return None
+        
+        # Görüntü adından anahtar kelimeleri çıkar
+        base_name = os.path.splitext(os.path.basename(image_filename))[0].lower()
+        
+        # Anahtar kelimeleri bul (urgup, karlik, vb.)
+        keywords = []
+        common_names = ['urgup', 'karlik', 'kapadokya', 'bern']
+        for name in common_names:
+            if name in base_name:
+                keywords.append(name)
+        
+        # Referans dosyalarını ara
+        reference_files = []
+        if os.path.isdir(reference_dir):
+            for file in os.listdir(reference_dir):
+                if file.lower().endswith(('.tif', '.tiff')):
+                    reference_files.append(file)
+        else:
+            # Tek dosya olabilir
+            if os.path.exists(reference_dir) and reference_dir.lower().endswith(('.tif', '.tiff')):
+                return reference_dir
+        
+        if len(reference_files) == 0:
+            return None
+        
+        # Anahtar kelimelere göre eşleşme bul
+        best_match = None
+        best_score = 0
+        
+        for ref_file in reference_files:
+            ref_lower = ref_file.lower()
+            score = 0
+            
+            # Anahtar kelimeler için puan ver
+            for keyword in keywords:
+                if keyword in ref_lower:
+                    score += 10
+            
+            # "georef", "georeference", "reference" gibi kelimeler için ekstra puan
+            if any(word in ref_lower for word in ['georef', 'reference', 'utm']):
+                score += 5
+            
+            if score > best_score:
+                best_score = score
+                best_match = ref_file
+        
+        if best_match:
+            ref_path = os.path.join(reference_dir, best_match)
+            logger.info(f"Referans raster bulundu: {best_match} (eşleşme puanı: {best_score})")
+            return ref_path
+        
+        # Eşleşme yoksa ilk referans dosyasını kullan
+        if len(reference_files) > 0:
+            ref_path = os.path.join(reference_dir, reference_files[0])
+            logger.warning(f"Tam eşleşme bulunamadı, varsayılan referans kullanılıyor: {reference_files[0]}")
+            return ref_path
+        
+        return None
     
     def load_image(self, path: str) -> np.ndarray:
         """
@@ -127,7 +244,8 @@ class ImageProcessor:
         prefix: str = 'goruntu',
         format: str = 'jpg',
         save_metadata: bool = False,
-        original_path: Optional[str] = None
+        original_path: Optional[str] = None,
+        show_progress: bool = True
     ) -> Tuple[List[np.ndarray], List[str], Dict[str, Any]]:
         """
         Görüntüyü küçük parçalara böler.
@@ -188,6 +306,12 @@ class ImageProcessor:
             except Exception as e:
                 logger.warning(f"GeoTransform bilgisi alınamadı: {e}")
         
+        total_pieces = num_frames_x * num_frames_y
+        
+        # Progress bar ile işle
+        if show_progress:
+            pbar = tqdm(total=total_pieces, desc="Parçalar bölünüyor", unit="parça", ncols=100)
+        
         for i in range(num_frames_x):
             for j in range(num_frames_y):
                 # Başlangıç ve bitiş koordinatlarını hesapla
@@ -211,8 +335,12 @@ class ImageProcessor:
                 img_cropped.append(crop)
                 filenames.append(filename)
                 
-                if (i * num_frames_y + j + 1) % 10 == 0:
-                    logger.info(f"Parça kaydedildi: {i+1}/{num_frames_x}, {j+1}/{num_frames_y}")
+                if show_progress:
+                    pbar.update(1)
+                    pbar.set_description(f"Parça [{i+1}/{num_frames_x}, {j+1}/{num_frames_y}]")
+        
+        if show_progress:
+            pbar.close()
         
         logger.info(f"Toplam {len(filenames)} parça oluşturuldu.")
         
@@ -312,9 +440,11 @@ class ImageProcessor:
         
         logger.info(f"Birleştirme parametreleri: {num_frames_x}x{num_frames_y}, crop_overlap={crop_overlap}")
         
-        # Tüm görüntüleri yükle
+        # Tüm görüntüleri yükle (progress bar ile)
         img_array = []
-        for img_file in files:
+        pbar = tqdm(files, desc="Görüntüler yükleniyor", unit="dosya", ncols=100) if TQDM_AVAILABLE else files
+        
+        for img_file in pbar:
             img_path = os.path.join(input_dir, img_file)
             img = cv2.imread(img_path)
             if img is None:
@@ -327,6 +457,9 @@ class ImageProcessor:
                 img = img[crop_overlap:h-crop_overlap, crop_overlap:w-crop_overlap]
             
             img_array.append(img)
+        
+        if TQDM_AVAILABLE and isinstance(pbar, tqdm):
+            pbar.close()
         
         if len(img_array) != num_frames_x * num_frames_y:
             logger.warning(f"Yüklenen görüntü sayısı ({len(img_array)}) "
@@ -640,12 +773,24 @@ class ImageProcessor:
                 logger.error(f"Görüntü işlenirken hata ({filename}): {e}")
                 return None
         
-        # Threading ile işle
+        # Threading ile işle (progress bar ile)
         if use_threading:
             with ThreadPoolExecutor() as executor:
-                results = list(executor.map(process_single_image, files))
+                if TQDM_AVAILABLE:
+                    results = list(tqdm(
+                        executor.map(process_single_image, files),
+                        total=len(files),
+                        desc="Model inference",
+                        unit="görüntü",
+                        ncols=100
+                    ))
+                else:
+                    results = list(executor.map(process_single_image, files))
         else:
-            results = [process_single_image(f) for f in files]
+            if TQDM_AVAILABLE:
+                results = [process_single_image(f) for f in tqdm(files, desc="Model inference", unit="görüntü", ncols=100)]
+            else:
+                results = [process_single_image(f) for f in files]
         
         # Başarılı sonuçları filtrele
         output_files = [f for f in results if f is not None]
@@ -806,7 +951,8 @@ class ImageProcessor:
                     prefix='goruntu',
                     format='jpg',
                     save_metadata=True,
-                    original_path=input_image
+                    original_path=input_image,
+                    show_progress=True
                 )
                 
                 results['split'] = {
@@ -963,21 +1109,43 @@ class ImageProcessor:
                 
                 logger.info(f"✓ Birleştirme tamamlandı: {merge_output_file}")
             
-            # 4. JEOREFERANSLAMA (eğer referans belirtilmişse)
+            # 4. JEOREFERANSLAMA
+            logger.info("=" * 60)
+            logger.info("4. ADIM: Jeoreferanslama")
+            logger.info("=" * 60)
+            
+            # Referans raster'ı bul (görüntü adına göre)
+            selected_reference = None
             if reference_raster and os.path.exists(reference_raster):
-                logger.info("=" * 60)
-                logger.info("4. ADIM: Jeoreferanslama")
-                logger.info("=" * 60)
+                # Manuel olarak belirtilmiş referans kullan
+                selected_reference = reference_raster
+                logger.info(f"Manuel referans kullanılıyor: {os.path.basename(selected_reference)}")
+            else:
+                # Görüntü adına göre referans bul
+                selected_reference = self.find_reference_raster(input_image, reference_dir=".")
                 
+                if not selected_reference:
+                    logger.warning("Referans raster bulunamadı, jeoreferanslama atlanıyor...")
+                    logger.info("İpucu: Referans raster dosyasını görüntü ile aynı dizine koyun veya reference_raster parametresi ile belirtin.")
+                else:
+                    logger.info(f"Otomatik referans bulundu: {os.path.basename(selected_reference)}")
+            
+            if selected_reference and os.path.exists(selected_reference):
                 # Birleştirilmiş görüntüleri jeoreferansla
-                for merge_result in results['merge']:
-                    merge_file = merge_result['output_file']
-                    
+                merge_files = [r['output_file'] for r in results['merge']]
+                
+                if TQDM_AVAILABLE:
+                    pbar = tqdm(merge_files, desc="Jeoreferanslama", unit="dosya", ncols=100)
+                else:
+                    pbar = merge_files
+                
+                for merge_file in pbar:
                     if not os.path.exists(merge_file):
                         logger.warning(f"Birleştirilmiş dosya bulunamadı: {merge_file}")
                         continue
                     
-                    logger.info(f"\nJeoreferanslama yapılıyor: {merge_file}")
+                    if TQDM_AVAILABLE:
+                        pbar.set_description(f"Jeoreferanslama: {os.path.basename(merge_file)}")
                     
                     # Çıktı dosya adı
                     base_name = os.path.splitext(os.path.basename(merge_file))[0]
@@ -986,7 +1154,7 @@ class ImageProcessor:
                     try:
                         self.georeference_image(
                             input_path=merge_file,
-                            reference_path=reference_raster,
+                            reference_path=selected_reference,
                             output_path=georef_output_file,
                             band=1,
                             compress='LZW'
@@ -994,15 +1162,20 @@ class ImageProcessor:
                         
                         results['georef'].append({
                             'input': merge_file,
-                            'output': georef_output_file
+                            'output': georef_output_file,
+                            'reference': selected_reference
                         })
                         
-                        logger.info(f"✓ Jeoreferanslama tamamlandı: {georef_output_file}")
+                        if not TQDM_AVAILABLE:
+                            logger.info(f"✓ Jeoreferanslama tamamlandı: {os.path.basename(georef_output_file)}")
                     except Exception as e:
                         logger.error(f"✗ Jeoreferanslama hatası ({merge_file}): {e}")
                         continue
+                
+                if TQDM_AVAILABLE:
+                    pbar.close()
             else:
-                logger.info("Referans raster belirtilmedi, jeoreferanslama atlanıyor...")
+                logger.info("Referans raster bulunamadı, jeoreferanslama atlanıyor...")
             
             logger.info("=" * 60)
             logger.info("TÜM İŞLEMLER TAMAMLANDI!")
