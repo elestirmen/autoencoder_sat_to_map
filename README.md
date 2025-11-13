@@ -1,243 +1,491 @@
-# AutoEncoder Map Generation Pipeline (tf.data + Keras)
+# 🗺️ AutoEncoder Map Generation Pipeline
 
-Bu repo; büyük ortofoto/uydu görüntülerini karolara bölerek, eğitilmiş otoenkoder tabanlı derin öğrenme modelleriyle karolardan harita/stil tahmini yapan, sonrasında karoları mozaikleyip GeoTIFF olarak jeoreferanslayan bir uçtan uca iş hattı sunar.
+> **tf.data + Keras ile Büyük Ölçekli Harita Üretim İş Hattı**
 
-Önceki Pix2Pix/GAN denemeleri arşivlenmiştir; güncel ve sadeleştirilmiş akış tf.data ile beslenen otoenkoder(ler) etrafında şekillenmiştir.
+Bu proje, büyük ortofoto ve uydu görüntülerini karolara bölerek, eğitilmiş otoenkoder tabanlı derin öğrenme modelleriyle harita/stil tahmini yapan ve sonrasında karoları mozaikleyip GeoTIFF olarak jeoreferanslayan uçtan uca bir iş hattı sunar.
 
-## İçindekiler
-- Özellikler ve Mimari
-- Dizin Yapısı
-- Akış Şeması (E2E)
-- Kurulum ve Bağımlılıklar
-- Veri Hazırlama (Karo Üretimi)
-- Eğitim
-  - Renkli (3→3)
-  - Gri/tek kanal (3→1 veya 1→1)
-- Çıkarım (Toplu Karo Tahmini) ve Birleştirme
-- Jeoreferans (GeoTIFF)
-- Yapılandırma ve Parametreler
-- Performans İpuçları
-- Sorun Giderme (FAQ)
+**Not:** Önceki Pix2Pix/GAN denemeleri arşivlenmiştir. Güncel ve sadeleştirilmiş akış, tf.data ile beslenen otoenkoder(ler) etrafında şekillenmiştir.
 
 ---
 
-## Özellikler ve Mimari
-- tf.data ile diskten akışkan okuma: Yan yana (sol: giriş, sağ: hedef) tutulan eğitim görsellerini runtime’da ikiye bölerek RAM kullanımını sınırlar.
-- Hafif U‑Net benzeri otoenkoderler: Encoder’de Conv+Pool, decoder’de UpSampling/TransposeConv; ELU + Dropout ile stabil ve hızlı eğitim.
-- Büyük görüntüler için karo tabanlı üretim: 512–544 kare boyutları, bindirme payı ile dikiş izlerini azaltma.
-- Çoklu model desteği: modeller klasöründeki tüm .h5 dosyalarıyla aynı parça seti üstünde çıkarım ve karşılaştırma.
-- Jeoreferans/GeoTIFF: Referans bir raster’ın CRS ve transform’u kopyalanarak çıktı mozaikler koordinatlandırılır.
+## 📋 İçindekiler
 
-## Dizin Yapısı
-Önemli dosya/klasörler:
-- `goruntu bolme.py`, `goruntu bolme_beta.py`: Kaynak TIF’ten karolar üretir (bindirme ile). Çıktı: `bolunmus/<harita>/...jpg`.
-- `autoencoder_dinamik_bellek_dosyadan_okuma_tf.data_renkli.py`: Renkli (3 kanal giriş → 3 kanal hedef) eğitim hattı.
-- `autoencoder_dinamik_bellek_dosyadan_okuma_tf.data_3_kanal_to_1_kanal.py`: Tek kanal hedef (gri) eğitim hattı; opsiyonel histogram eşitleme.
-- `harita_uretici_beta_gpt_hizli.py`: Gri/tek-kanal çıkarım + mozaik birleştirme.
-- `harita_uretici_beta_gpt_hizli_renkli.py`: Renkli çıkarım + mozaik birleştirme.
-- `harita_uretici_beta_gpt_hizli_3_kanal_to_1_kanal.py`: RGB giriş → 1 kanal çıktı çıkarım varyantı.
-- `georef_gpt.py`, `georef_gpt-ertugrul.py`: Mozaikleri referans raster’a göre GeoTIFF olarak jeoreferanslar.
-- `modeller/`: Çıkarımda kullanılacak Keras `.h5` modelleri.
-- `ana_haritalar/`: Birleştirilmiş mozaik (çıkarım) çıktıları.
-- `georefli/`: Jeoreferanslı GeoTIFF çıktıları.
-- `deleted/`: Eski/Arşiv script’ler (Pix2Pix vb.).
+- [Özellikler](#-özellikler)
+- [Mimari](#-mimari)
+- [Dizin Yapısı](#-dizin-yapısı)
+- [Akış Şeması](#-akış-şeması-e2e)
+- [Kurulum](#-kurulum-ve-bağımlılıklar)
+- [Kullanım](#-kullanım)
+  - [Veri Hazırlama](#1-veri-hazırlama-karo-üretimi)
+  - [Eğitim](#2-eğitim)
+  - [Çıkarım](#3-çıkarım-toplu-karo-tahmini-ve-birleştirme)
+  - [Jeoreferans](#4-jeoreferans-geotiff)
+- [Yapılandırma](#-yapılandırma-ve-parametreler)
+- [Performans](#-performans-ipuçları)
+- [Sorun Giderme](#-sorun-giderme-faq)
+- [Hızlı Başlangıç](#-hızlı-başlangıç)
 
-## Akış Şeması (E2E)
+---
+
+## ✨ Özellikler
+
+- **🎯 tf.data ile Akışkan Veri İşleme**: Yan yana (sol: giriş, sağ: hedef) tutulan eğitim görsellerini runtime'da ikiye bölerek RAM kullanımını optimize eder
+- **🧠 Hafif U-Net Benzeri Otoenkoderler**: Encoder'de Conv+Pool, decoder'de UpSampling/TransposeConv; ELU + Dropout ile stabil ve hızlı eğitim
+- **🔲 Büyük Görüntüler için Karo Tabanlı Üretim**: 512–544 piksel kare boyutları, bindirme payı ile dikiş izlerini azaltma
+- **🔄 Çoklu Model Desteği**: `modeller/` klasöründeki tüm `.h5` dosyalarıyla aynı parça seti üzerinde çıkarım ve karşılaştırma
+- **🌍 Jeoreferans/GeoTIFF Desteği**: Referans raster'ın CRS ve transform'u kopyalanarak çıktı mozaikler koordinatlandırılır
+
+---
+
+## 🏗️ Mimari
+
+Proje, aşağıdaki ana bileşenlerden oluşur:
+
+1. **Veri Hazırlama**: Büyük TIF görüntülerini karolara bölme
+2. **Eğitim Pipeline**: tf.data ile veri yükleme ve otoenkoder eğitimi
+3. **Çıkarım Pipeline**: Toplu karo tahmini ve mozaik birleştirme
+4. **Jeoreferans**: GeoTIFF formatında koordinatlandırma
+
+---
+
+## 📁 Dizin Yapısı
+
+```
+AutoEncoder_pix2pix/
+│
+├── 📄 goruntu bolme.py                    # Karo üretimi (544×544 + bindirme)
+├── 📄 goruntu bolme_beta.py               # Karo üretimi (512×512 + bindirme, grid)
+│
+├── 🧠 Eğitim Scriptleri
+│   ├── autoencoder_dinamik_bellek_dosyadan_okuma_tf.data_renkli.py
+│   │   └── Renkli (3 kanal → 3 kanal) eğitim
+│   └── autoencoder_dinamik_bellek_dosyadan_okuma_tf.data_3_kanal_to_1_kanal.py
+│       └── Gri/tek kanal (3→1 veya 1→1) eğitim
+│
+├── 🎨 Çıkarım Scriptleri
+│   ├── harita_uretici_beta_gpt_hizli.py                    # Gri/tek-kanal çıkarım
+│   ├── harita_uretici_beta_gpt_hizli_renkli.py            # Renkli çıkarım
+│   └── harita_uretici_beta_gpt_hizli_3_kanal_to_1_kanal.py # RGB → 1 kanal çıkarım
+│
+├── 🌍 Jeoreferans Scriptleri
+│   ├── georef_gpt.py
+│   └── georef_gpt-ertugrul.py
+│
+├── 📂 bolunmus/                           # Üretilen karolar
+│   └── <harita>/                          # Her harita için alt klasör
+│
+├── 📂 modeller/                           # Eğitilmiş Keras modelleri (.h5)
+│
+├── 📂 ana_haritalar/                       # Birleştirilmiş mozaik çıktıları
+│
+├── 📂 georefli/                           # Jeoreferanslı GeoTIFF çıktıları
+│
+└── 📂 deleted/                            # Arşivlenmiş eski scriptler
+```
+
+---
+
+## 🔄 Akış Şeması (E2E)
 
 ```mermaid
 flowchart TD
-    A[Kaynak TIF (Büyük Ortofoto/Uydu)] --> B[Kırpma/Karo Üretimi\ngoruntu bolme*.py]
-    B --> C[Parça Klasörü: bolunmus/<harita>/]
-    subgraph Eğitim (Opsiyonel, tf.data)
-      D1[Yan Yana Veri\n(sol:girdi | sağ:hedef)] --> D2[tf.data ile yükle\nve ikiye böl]
-      D2 --> D3[Otoenkoder Eğitim\n(Keras/ELU/Dropout)]
-      D3 --> D4[Model Kaydı .h5]
+    A[📸 Kaynak TIF<br/>Büyük Ortofoto/Uydu] --> B[✂️ Kırpma/Karo Üretimi<br/>goruntu bolme*.py]
+    B --> C[📁 Parça Klasörü<br/>bolunmus/&lt;harita&gt;/]
+    
+    subgraph Eğitim["🎓 Eğitim (Opsiyonel, tf.data)"]
+        D1[🖼️ Yan Yana Veri<br/>sol:girdi | sağ:hedef] --> D2[📊 tf.data ile yükle<br/>ve ikiye böl]
+        D2 --> D3[🧠 Otoenkoder Eğitim<br/>Keras/ELU/Dropout]
+        D3 --> D4[💾 Model Kaydı .h5]
     end
-    C --> E[Çıkarım (Parça Tahmini)\nharita_uretici_* .py]
+    
+    C --> E[🔮 Çıkarım<br/>Parça Tahmini<br/>harita_uretici_* .py]
     D4 --> E
-    E --> F[Mozaik Birleştirme\n(bindirme kırpma + h/v stack)]
-    F --> G[Çıktı: ana_haritalar/]
-    G --> H[Jeoreferanslama\n(georef_gpt*.py)]
-    H --> I[GeoTIFF (UTM/CRS)\n georefli/]
+    E --> F[🧩 Mozaik Birleştirme<br/>bindirme kırpma + h/v stack]
+    F --> G[📄 Çıktı<br/>ana_haritalar/]
+    G --> H[🌍 Jeoreferanslama<br/>georef_gpt*.py]
+    H --> I[🗺️ GeoTIFF<br/>UTM/CRS<br/>georefli/]
+    
+    style A fill:#e1f5ff
+    style D4 fill:#fff4e1
+    style I fill:#e8f5e9
 ```
 
 ---
 
-## Kurulum ve Bağımlılıklar
-- Python 3.8–3.10 önerilir
-- Paketler:
-  - Derin öğrenme: `tensorflow` (veya `tensorflow-gpu`), `keras` (TF içinden)
-  - Görüntü: `opencv-python`, `Pillow`, `numpy`, `matplotlib`, `natsort`
-  - Coğrafi: `rasterio`, `GDAL`
-  - Opsiyonel: `tensorflow-addons` (histogram eşitleme)
+## 🚀 Kurulum ve Bağımlılıklar
 
-Kurulum (Windows, PowerShell):
+### Gereksinimler
+
+- **Python**: 3.8–3.10 (önerilir)
+- **İşletim Sistemi**: Windows (PowerShell), Linux, macOS
+
+### Gerekli Paketler
+
+| Kategori | Paketler |
+|----------|----------|
+| **Derin Öğrenme** | `tensorflow` (veya `tensorflow-gpu`), `keras` |
+| **Görüntü İşleme** | `opencv-python`, `Pillow`, `numpy`, `matplotlib`, `natsort` |
+| **Coğrafi Veri** | `rasterio`, `GDAL` |
+| **Opsiyonel** | `tensorflow-addons` (histogram eşitleme için) |
+
+### Kurulum Yöntemleri
+
+#### Yöntem 1: Virtual Environment (Python venv)
+
 ```powershell
+# Sanal ortam oluştur
 python -m venv .venv
+
+# Sanal ortamı aktifleştir
 .\.venv\Scripts\Activate.ps1
+
+# pip'i güncelle
 pip install --upgrade pip
+
+# Paketleri yükle
 pip install tensorflow opencv-python Pillow numpy matplotlib natsort rasterio tensorflow-addons
-# GDAL: Windows’ta hazır wheel kullanın (örn. Gohlke veya conda).
-# pip ile denerken GDAL_VERSION ve include/library yollarını ayarlamanız gerekebilir.
+
+# Not: GDAL için Windows'ta hazır wheel kullanın (örn. Gohlke veya conda)
+# pip ile kurulumda GDAL_VERSION ve include/library yollarını ayarlamanız gerekebilir
 ```
 
-Conda ile (öneri):
+#### Yöntem 2: Conda (Önerilen) ⭐
+
 ```powershell
+# Conda ortamı oluştur
 conda create -n mapa python=3.10 -y
+
+# Ortamı aktifleştir
 conda activate mapa
+
+# Paketleri yükle (conda-forge kanalından)
 conda install -c conda-forge tensorflow rasterio gdal opencv pillow matplotlib natsort tensorflow-addons -y
 ```
 
-GDAL/Rasterio Windows kurulumunda sık hata alınır; mümkünse conda-forge tercih edin.
+> **💡 İpucu:** GDAL/Rasterio Windows kurulumunda sık hata alınır; mümkünse conda-forge tercih edin.
 
 ---
 
-## Veri Hazırlama (Karo Üretimi)
-- Kaynak: Büyük `.tif` ortofoto/uydu görseli
-- Karo üretimi için script’lerden birini kullanın:
-  - Basit ve kare ölçekli: `goruntu bolme.py` (544×544 + bindirme)
-  - Tam grid üzerinde: `goruntu bolme_beta.py` (512×512 + bindirme, X×Y)
+## 📖 Kullanım
 
-Örnek kullanım (PowerShell):
+### 1. Veri Hazırlama (Karo Üretimi)
+
+Büyük `.tif` ortofoto/uydu görselini karolara bölün.
+
+#### Script Seçimi
+
+| Script | Özellikler | Kullanım |
+|--------|------------|----------|
+| `goruntu bolme.py` | Basit ve kare ölçekli | 544×544 + bindirme |
+| `goruntu bolme_beta.py` | Tam grid üzerinde | 512×512 + bindirme, X×Y grid |
+
+#### Kullanım
+
+1. Script içinde `path` değişkenini kaynak TIF dosyanıza ayarlayın
+2. Script'i çalıştırın:
+
 ```powershell
-# goruntu bolme.py içinde path değişkenini kaynak TIF’e ayarlayın
 python "goruntu bolme.py"
-# Çıktılar: bolunmus/<harita>/...jpg
 ```
 
-Bindirme (genişleme) pikselleri birleştirme aşamasında içerden kırpılır (dikiş izini azaltır).
+**Çıktı:** `bolunmus/<harita>/...jpg`
+
+> **Not:** Bindirme (genişleme) pikselleri birleştirme aşamasında içerden kırpılır, böylece dikiş izleri azaltılır.
 
 ---
 
-## Eğitim
-Eğitim verisi tek görüntü içinde “yan yana ikili” formatta olmalı:
-- Sol yarı: giriş (ör. uydu/ortofoto)
-- Sağ yarı: hedef (istenen stil/harita)
+### 2. Eğitim
 
-Scriptler bu görüntüyü runtime’da ikiye böler, 544×544’e yeniden boyutlandırır ve [-1, 1] aralığına normalleştirir.
+#### Veri Formatı
 
-### Renkli (3→3)
-Dosya: `autoencoder_dinamik_bellek_dosyadan_okuma_tf.data_renkli.py`
-- Veri kökünü değiştirin:
-  - `all_image_paths = "C:\\d_surucusu\\satnap\\output_ps_renkli\\" + ...`
-- Model: `create_gpt_autoencoder_none_regularization(...)` (ELU + Dropout, 3 kanal çıktı)
-- Not: Script, modeli oluşturduktan sonra `son_model.h5` yükleyerek devam eğitim kurgusuna uygun çalışır. Sıfırdan eğitim istiyorsanız `model = load_model("son_model.h5")` satırını yoruma alın.
+Eğitim verisi tek görüntü içinde **"yan yana ikili"** formatta olmalıdır:
 
-Çalıştırma:
+- **Sol yarı**: Giriş (ör. uydu/ortofoto)
+- **Sağ yarı**: Hedef (istenen stil/harita)
+
+Scriptler bu görüntüyü runtime'da ikiye böler, 544×544'e yeniden boyutlandırır ve `[-1, 1]` aralığına normalleştirir.
+
+#### 2.1. Renkli Eğitim (3→3)
+
+**Dosya:** `autoencoder_dinamik_bellek_dosyadan_okuma_tf.data_renkli.py`
+
+**Yapılandırma:**
+
+1. Veri kökünü değiştirin:
+   ```python
+   all_image_paths = "C:\\d_surucusu\\satnap\\output_ps_renkli\\" + ...
+   ```
+
+2. Model: `create_gpt_autoencoder_none_regularization(...)` 
+   - ELU + Dropout aktivasyonları
+   - 3 kanal çıktı
+
+3. **Önemli:** Script, modeli oluşturduktan sonra `son_model.h5` yükleyerek devam eğitim kurgusuna uygun çalışır. 
+   - Sıfırdan eğitim için: `model = load_model("son_model.h5")` satırını yoruma alın
+   - Devam eğitim için: Bu satırı aktif tutun
+
+**Çalıştırma:**
+
 ```powershell
 python "autoencoder_dinamik_bellek_dosyadan_okuma_tf.data_renkli.py"
 ```
 
-### Gri/Tek Kanal (3→1 veya 1→1)
-Dosya: `autoencoder_dinamik_bellek_dosyadan_okuma_tf.data_3_kanal_to_1_kanal.py`
-- Veri kökünü değiştirin:
-  - `all_image_paths = "C:\\d_surucusu\\satmap\\output_full\\" + ...`
-- Opsiyonel histogram eşitleme: `tensorflow-addons` ile `tfa.image.equalize`
-- Varsayılan model: `create_advanced_autoencoder(...)` (1 kanal çıktı)
-- Aynı şekilde, `model = load_model("son_model.h5")` satırı devam eğitim içindir.
+#### 2.2. Gri/Tek Kanal Eğitim (3→1 veya 1→1)
 
-Çalıştırma:
+**Dosya:** `autoencoder_dinamik_bellek_dosyadan_okuma_tf.data_3_kanal_to_1_kanal.py`
+
+**Yapılandırma:**
+
+1. Veri kökünü değiştirin:
+   ```python
+   all_image_paths = "C:\\d_surucusu\\satmap\\output_full\\" + ...
+   ```
+
+2. Opsiyonel histogram eşitleme: `tensorflow-addons` ile `tfa.image.equalize`
+
+3. Varsayılan model: `create_advanced_autoencoder(...)` (1 kanal çıktı)
+
+4. Devam eğitimi için: `model = load_model("son_model.h5")` satırını kontrol edin
+
+**Çalıştırma:**
+
 ```powershell
 python "autoencoder_dinamik_bellek_dosyadan_okuma_tf.data_3_kanal_to_1_kanal.py"
 ```
 
-Eğitim sonunda `son_model.h5` ve epoch bazlı checkpoint’ler üretilir.
+**Çıktılar:**
+- `son_model.h5`: Son eğitilmiş model
+- Epoch bazlı checkpoint'ler
 
 ---
 
-## Çıkarım (Toplu Karo Tahmini) ve Birleştirme
-- Modelleri `modeller/` klasörüne koyun (birden fazla .h5 desteklenir).
-- Karo klasörünüz `bolunmus/<harita>/...` şeklinde olmalı.
+### 3. Çıkarım (Toplu Karo Tahmini ve Birleştirme)
 
-Gri/tek kanal çıkarım:
+#### Hazırlık
+
+1. Eğitilmiş modelleri `modeller/` klasörüne koyun (birden fazla `.h5` dosyası desteklenir)
+2. Karo klasörünüz `bolunmus/<harita>/...` şeklinde olmalı
+
+#### Çıkarım Scriptleri
+
+| Senaryo | Script | Açıklama |
+|---------|--------|----------|
+| **Gri/Tek kanal** | `harita_uretici_beta_gpt_hizli.py` | Tek kanal çıkarım + mozaik birleştirme |
+| **Renkli** | `harita_uretici_beta_gpt_hizli_renkli.py` | Renkli çıkarım + mozaik birleştirme |
+| **RGB → 1 kanal** | `harita_uretici_beta_gpt_hizli_3_kanal_to_1_kanal.py` | RGB giriş → 1 kanal çıktı |
+
+#### Kullanım
+
 ```powershell
+# Gri/tek kanal çıkarım
 python "harita_uretici_beta_gpt_hizli.py"
-```
 
-Renkli çıkarım:
-```powershell
+# Renkli çıkarım
 python "harita_uretici_beta_gpt_hizli_renkli.py"
-```
 
-3→1 varyantı:
-```powershell
+# 3→1 varyantı
 python "harita_uretici_beta_gpt_hizli_3_kanal_to_1_kanal.py"
 ```
 
-Script, parçaları model(ler) ile tahmin eder, bindirme kenarlarını içeriden kırpar ve satır-sütun halinde birleştirerek `ana_haritalar/ana_harita_<harita>_<model>.jpg` dosyasını üretir.
+**İşlem Adımları:**
 
-Notlar:
-- Grid ölçüleri: Bazı script’lerde sabit başlangıç değeri ve karekök tabanlı otomatik kare grid modu bulunur. Eğer parça sayınız kare sayı değilse sabit frame_adedi_x/y değerlerini doğru ayarlayın.
-- Renkli akışta OpenCV BGR sırası ile RGB karışabilir; gerekli dönüşümler script’te yapılmıştır.
+1. Script, parçaları model(ler) ile tahmin eder
+2. Bindirme kenarlarını içerden kırpar
+3. Satır-sütun halinde birleştirir
+4. Çıktı: `ana_haritalar/ana_harita_<harita>_<model>.jpg`
+
+**Önemli Notlar:**
+
+- **Grid ölçüleri:** Bazı script'lerde sabit başlangıç değeri ve karekök tabanlı otomatik kare grid modu bulunur. Parça sayınız kare sayı değilse `frame_adedi_x/y` değerlerini manuel ayarlayın.
+- **Renk dönüşümü:** Renkli akışta OpenCV BGR sırası ile RGB karışabilir; gerekli dönüşümler script'te yapılmıştır.
 
 ---
 
-## Jeoreferans (GeoTIFF)
-Mozaiklenmiş çıktı `.jpg` dosyalarını bir referans GeoTIFF’in CRS ve transform’u ile jeoreferanslayın.
+### 4. Jeoreferans (GeoTIFF)
 
-- Referans raster yolunu ayarlayın (örnek: `ana_harita_urgup_30_cm__Georefference_utm.tif`).
-- Çalıştırma:
+Mozaiklenmiş çıktı `.jpg` dosyalarını bir referans GeoTIFF'in CRS ve transform'u ile jeoreferanslayın.
+
+#### Yapılandırma
+
+1. Referans raster yolunu script içinde ayarlayın:
+   ```python
+   # Örnek: ana_harita_urgup_30_cm__Georefference_utm.tif
+   ```
+
+#### Çalıştırma
+
 ```powershell
 python "georef_gpt.py"
 # veya
 python "georef_gpt-ertugrul.py"
 ```
-- Çıktılar `georefli/` altında `.tif` olarak yazılır (LZW ya da JPEG sıkıştırma seçenekleri script’te).
+
+**Çıktı:** `georefli/` klasörü altında `.tif` dosyaları (LZW veya JPEG sıkıştırma seçenekleri script'te mevcuttur)
 
 ---
 
-## Yapılandırma ve Parametreler
-Önemli parametreler ve nerede ayarlanacağı:
-- Karo boyutu ve bindirme: `goruntu bolme*.py` içinde `frame_size`, `genisletme`
-- Eğitim verisi kökü: eğitim script’lerinde `all_image_paths`
-- Giriş/çıkış kanal sayısı: kullanılan model fonksiyonuna göre (3→3, 3→1, 1→1)
-- Batch size, optimizer, loss: eğitim script’lerinin alt bölümünde
-- Model yükleme/başlangıç: `model = load_model("son_model.h5")` (devam eğitim) satırını ihtiyaca göre kullanın/yorumlayın
-- Çıkarım model klasörü: `modeller/`
-- Çıktı klasörleri: `c:/d_surucusu/parcalar/` (parçalar), `ana_haritalar/` (mozaik), `georefli/` (GeoTIFF)
+## ⚙️ Yapılandırma ve Parametreler
 
-Öneri: Yolları ve parametreleri merkezi bir `config.yaml` dosyasına almak taşınabilirliği artırır (isteğe bağlı).
+### Önemli Parametreler
 
----
+| Parametre | Konum | Açıklama |
+|-----------|-------|----------|
+| **Karo boyutu** | `goruntu bolme*.py` | `frame_size` (512 veya 544) |
+| **Bindirme payı** | `goruntu bolme*.py` | `genisletme` (piksel cinsinden) |
+| **Eğitim verisi kökü** | Eğitim script'leri | `all_image_paths` değişkeni |
+| **Giriş/çıkış kanalları** | Model fonksiyonları | 3→3, 3→1, 1→1 |
+| **Batch size** | Eğitim script'leri | GPU VRAM'a göre ayarlayın |
+| **Optimizer & Loss** | Eğitim script'leri | Script'in alt bölümünde |
+| **Model yükleme** | Eğitim script'leri | `model = load_model("son_model.h5")` (devam eğitim için) |
+| **Çıkarım model klasörü** | Çıkarım script'leri | `modeller/` |
+| **Çıktı klasörleri** | Script'ler | `ana_haritalar/`, `georefli/` |
 
-## Performans İpuçları
-- tf.data ayarları: `num_parallel_calls`, `batch`, `prefetch` değerlerini donanıma göre yükseltin. `AUTOTUNE` çoğu ortamda iyi çalışır.
-- GPU kullanımı: TensorFlow GPU kurulumunu doğrulayın; batch size’ı VRAM’a göre ayarlayın.
-- I/O: Karo boyutu ve bindirme, disk I/O ve RAM kullanımını belirler. Daha az bindirme daha hızlı, fakat dikiş riskini artırır.
-- Çıkarımda ThreadPool: `harita_uretici_beta_gpt_hizli*.py` paralel çıkarım yapar. CPU çekirdeklerine göre thread sayısını sınırlandırmak isteyebilirsiniz.
+### Öneri
 
----
-
-## Sorun Giderme (FAQ)
-- GDAL/Rasterio kurulumu hata veriyor:
-  - Windows’ta conda-forge ile kurulum yapın. pip ile derleme yol ayarları zahmetlidir.
-- Renkler ters görünüyor (çıkarım):
-  - OpenCV’nin BGR, matplotlib’in RGB kullandığını unutmayın. Script’te `cvtColor` dönüşümü var; görsel yolunuza göre düzenleyin.
-- Eğitim yeniden başlamak yerine “devam ediyor”:
-  - Script’teki `model = load_model("son_model.h5")` satırını yoruma alın (sıfırdan başlar).
-- Karo sayısından grid hesaplanamıyor:
-  - Script’teki `frame_adedi_x/y` değerlerini manuel ve doğru şekilde ayarlayın.
-- Bellek hataları:
-  - `batch_size` düşürün, karoları diskten akışkan okuyun (zaten tf.data yapıyor), görsel çözünürlüğünü azaltmayı düşünün.
+Yolları ve parametreleri merkezi bir `config.yaml` dosyasına almak taşınabilirliği artırır (isteğe bağlı).
 
 ---
 
-## Hızlı Başlangıç (Özet)
-1) Karo üretimi: `goruntu bolme*.py` içinde `path` → kaynak TIF
+## 🚀 Performans İpuçları
+
+### tf.data Optimizasyonu
+
+- `num_parallel_calls`, `batch`, `prefetch` değerlerini donanıma göre yükseltin
+- `AUTOTUNE` çoğu ortamda iyi çalışır
+
+### GPU Kullanımı
+
+- TensorFlow GPU kurulumunu doğrulayın: `tf.config.list_physical_devices('GPU')`
+- Batch size'ı VRAM'a göre ayarlayın
+- Mixed precision training kullanmayı düşünün
+
+### I/O Optimizasyonu
+
+- Karo boyutu ve bindirme, disk I/O ve RAM kullanımını belirler
+- Daha az bindirme daha hızlı, fakat dikiş riskini artırır
+- SSD kullanımı önerilir
+
+### Çıkarım Optimizasyonu
+
+- `harita_uretici_beta_gpt_hizli*.py` paralel çıkarım yapar
+- CPU çekirdeklerine göre thread sayısını sınırlandırmak isteyebilirsiniz
+- Batch inference kullanarak GPU kullanımını artırın
+
+---
+
+## 🔧 Sorun Giderme (FAQ)
+
+### GDAL/Rasterio Kurulumu Hata Veriyor
+
+**Sorun:** Windows'ta GDAL kurulumu başarısız oluyor.
+
+**Çözüm:**
+- Conda-forge ile kurulum yapın (önerilen)
+- pip ile kurulumda GDAL_VERSION ve include/library yollarını ayarlamanız gerekebilir
+- Alternatif: [OSGeo4W](https://trac.osgeo.org/osgeo4w/) kullanın
+
+### Renkler Ters Görünüyor (Çıkarım)
+
+**Sorun:** Üretilen görüntülerde renkler beklenenden farklı.
+
+**Çözüm:**
+- OpenCV BGR, matplotlib RGB kullanır
+- Script'te `cvtColor` dönüşümü var; görsel yolunuza göre düzenleyin
+- Gerekirse `cv2.COLOR_BGR2RGB` veya `cv2.COLOR_RGB2BGR` kullanın
+
+### Eğitim Yeniden Başlamak Yerine "Devam Ediyor"
+
+**Sorun:** Script her çalıştırmada önceki modeli yüklüyor.
+
+**Çözüm:**
+- Script'teki `model = load_model("son_model.h5")` satırını yoruma alın
+- Veya `son_model.h5` dosyasını geçici olarak taşıyın
+
+### Karo Sayısından Grid Hesaplanamıyor
+
+**Sorun:** Grid boyutları yanlış hesaplanıyor.
+
+**Çözüm:**
+- Script'teki `frame_adedi_x/y` değerlerini manuel ve doğru şekilde ayarlayın
+- Parça sayısını kontrol edin: `len(os.listdir("bolunmus/<harita>/"))`
+
+### Bellek Hataları
+
+**Sorun:** Out of memory (OOM) hataları alıyorum.
+
+**Çözüm:**
+- `batch_size` değerini düşürün
+- Karoları diskten akışkan okuyun (zaten tf.data yapıyor)
+- Görsel çözünürlüğünü azaltmayı düşünün
+- GPU'da mixed precision training kullanın
+
+### Model Yüklenemiyor
+
+**Sorun:** `.h5` dosyası yüklenirken hata alıyorum.
+
+**Çözüm:**
+- Model dosyasının tam yolunu kontrol edin
+- TensorFlow/Keras sürüm uyumluluğunu kontrol edin
+- Model dosyasının bozuk olmadığından emin olun
+
+---
+
+## 🎯 Hızlı Başlangıç
+
+### Adım 1: Karo Üretimi
+
 ```powershell
+# goruntu bolme.py içinde path değişkenini kaynak TIF'e ayarlayın
 python "goruntu bolme.py"
 ```
-2) Eğitim (opsiyonel): veri kökü → eğitim script’inde `all_image_paths`
+
+**Çıktı:** `bolunmus/<harita>/...jpg`
+
+---
+
+### Adım 2: Eğitim (Opsiyonel)
+
 ```powershell
+# Veri kökünü eğitim script'inde all_image_paths değişkenine ayarlayın
 python "autoencoder_dinamik_bellek_dosyadan_okuma_tf.data_renkli.py"
 ```
-3) Çıkarım + birleştirme: modelleri `modeller/` içine koyun
+
+**Çıktı:** `son_model.h5` ve checkpoint'ler
+
+---
+
+### Adım 3: Çıkarım + Birleştirme
+
 ```powershell
+# Modelleri modeller/ klasörüne koyun
 python "harita_uretici_beta_gpt_hizli.py"
 ```
-4) Jeoreferans/GeoTIFF:
+
+**Çıktı:** `ana_haritalar/ana_harita_<harita>_<model>.jpg`
+
+---
+
+### Adım 4: Jeoreferans/GeoTIFF
+
 ```powershell
+# Referans raster yolunu script içinde ayarlayın
 python "georef_gpt.py"
 ```
 
-Keyifli çalışmalar!
+**Çıktı:** `georefli/<harita>_<model>.tif`
+
+---
+
+## 📝 Lisans
+
+Bu proje akademik/araştırma amaçlı geliştirilmiştir.
+
+---
+
+## 🤝 Katkıda Bulunma
+
+Öneriler ve katkılarınızı bekliyoruz! Lütfen issue açarak veya pull request göndererek katkıda bulunun.
+
+---
+
+**Keyifli çalışmalar! 🚀**
