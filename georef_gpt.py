@@ -50,14 +50,14 @@ def main():
                          'nodata': 0})
 
         # Çıktı dosyasının yolunu oluştur
-        output_path = os.path.join("georefli", "harita", f"{harita}_geo.tif")
+        output_path = os.path.join("georefli", "harita_temp", f"{harita}_geo.tif")
 
         # Yeni raster dosyasını yaz
         with rasterio.open(output_path, 'w', **out_meta) as dst:
             dst.write_band(1, dosya.astype(rasterio.uint8))
 
     # Georeferanslı haritaların bulunduğu dizin
-    data_dir_haritalar = "georefli/harita"
+    data_dir_haritalar = "georefli/harita_temp"
     haritalar_list = os.listdir(data_dir_haritalar)
 
     # Georeferanslı haritalar dizinindeki tüm haritalar üzerinde işlem yap
@@ -72,7 +72,7 @@ def main():
         print("y = ", pixel_size_y)
 
         # Çıktı dosyasının yolunu oluştur
-        output_path = os.path.join("georefli", f"{harita}_UTM_geo_r.tif")
+        output_path = os.path.join("georefli/harita", f"{harita}_UTM_geo_r.tif")
 
         # GDAL Translate seçeneklerini belirle
         translate_options = gdal.TranslateOptions(format='GTiff',
