@@ -1,0 +1,18 @@
+# Her şeyi ignore et
+*
+
+# Ama klasörleri etme (alt dizinler görünür kalsın)
+!*/
+
+# Bu dosyalar ve uzantılar izinli (beyaz liste):
+!.gitignore
+!*.py
+!*.txt
+!*.csv
+!*.md
+!*.MD
+!*.atn
+!*.xlsx
+!*.XLSX
+!*.docx
+!*.DOCX
