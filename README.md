@@ -34,6 +34,10 @@ Bu proje, büyük ortofoto ve uydu görüntülerini karolara bölerek, eğitilmi
 - **🔲 Büyük Görüntüler için Karo Tabanlı Üretim**: 512–544 piksel kare boyutları, bindirme payı ile dikiş izlerini azaltma
 - **🔄 Çoklu Model Desteği**: `modeller/` klasöründeki tüm `.h5` dosyalarıyla aynı parça seti üzerinde çıkarım ve karşılaştırma
 - **🌍 Jeoreferans/GeoTIFF Desteği**: Referans raster'ın CRS ve transform'u kopyalanarak çıktı mozaikler koordinatlandırılır
+- **⭐ YENİ: Tek Dosyada Tüm İşlemler**: `goruntu_islemleri.py` ile bölme, model inference, birleştirme ve jeoreferanslama tek komutla
+- **⭐ YENİ: Akıllı Referans Seçimi**: Görüntü dosya adına göre otomatik referans raster bulma
+- **⭐ YENİ: Progress Bar Desteği**: Tüm işlemlerde ilerleme çubuğu ile durum takibi
+- **⭐ YENİ: Akıllı Bölme Atlama**: Daha önce bölünmüş görüntüler için bölme işlemini atlama
 
 ---
 
@@ -55,6 +59,8 @@ AutoEncoder_pix2pix/
 │
 ├── 📄 goruntu bolme.py                    # Karo üretimi (544×544 + bindirme)
 ├── 📄 goruntu bolme_beta.py               # Karo üretimi (512×512 + bindirme, grid)
+├── 📄 goruntu_islemleri.py                # ⭐ TÜM İŞLEMLERİ TEK DOSYADA (YENİ!)
+│   └── Bölme + Model Inference + Birleştirme + Jeoreferanslama
 │
 ├── 🧠 Eğitim Scriptleri
 │   ├── autoencoder_dinamik_bellek_dosyadan_okuma_tf.data_renkli.py
@@ -72,18 +78,29 @@ AutoEncoder_pix2pix/
 │   └── georef_gpt-ertugrul.py
 │
 ├── 📂 bolunmus/                           # Üretilen karolar
-│   └── <harita>/                          # Her harita için alt klasör
-│       └── (goruntu bolme_beta.py için: bolunmus/bolunmus/)
+│   └── bolunmus/                          # (goruntu_islemleri.py için)
+│       └── <görüntü_adı>/                 # Her görüntü için alt klasör
+│           ├── goruntu_0_0.jpg
+│           ├── goruntu_0_1.jpg
+│           └── metadata.json
 │
 ├── 📂 modeller/                           # Eğitilmiş Keras modelleri (.h5)
 │
+├── 📂 parcalar/                            # Model'den geçmiş parçalar (goruntu_islemleri.py için)
+│   └── <görüntü_adı>/
+│       └── <model_adı>/
+│
 ├── 📂 ana_haritalar/                       # Birleştirilmiş mozaik çıktıları (.jpg)
+│
+├── 📂 georeferans_sample/                  # ⭐ Referans raster dosyaları (YENİ!)
+│   ├── ana_harita_urgup_30_cm__Georefference_utm.tif
+│   └── ana_harita_karlik_30_cm_bingmap_Georeferans.tif
 │
 ├── 📂 georefli/                           # Jeoreferanslı GeoTIFF çıktıları
 │   ├── harita/                            # (georef_gpt-ertugrul.py için)
 │   └── harita_temp/                       # (georef_gpt-ertugrul.py için, ara çıktı)
 │
-├── 📂 c:/d_surucusu/parcalar/              # Geçici parça çıktıları (çıkarım sırasında)
+├── 📂 c:/d_surucusu/parcalar/              # Geçici parça çıktıları (eski scriptler için)
 │
 └── 📂 deleted/                            # Arşivlenmiş eski scriptler
 ```
@@ -172,6 +189,126 @@ conda install -c conda-forge tensorflow rasterio gdal opencv pillow matplotlib n
 ---
 
 ## 📖 Kullanım
+
+### ⭐ 0. Tek Dosyada Tüm İşlemler (Önerilen - YENİ!)
+
+**`goruntu_islemleri.py`** script'i tüm işlemleri tek seferde yapar: Bölme → Model Inference → Birleştirme → Jeoreferanslama
+
+#### Özellikler
+
+- ✅ Parametre olmadan varsayılan değerlerle çalışma
+- ✅ Görüntü adına göre otomatik klasör oluşturma
+- ✅ Daha önce bölünmüş görüntüler için akıllı atlama
+- ✅ Görüntü adına göre otomatik referans raster seçimi
+- ✅ Progress bar ile ilerleme takibi
+- ✅ Çoklu model desteği (tüm modeller otomatik işlenir)
+
+#### Hazırlık
+
+1. **Referans raster dosyalarını `georeferans_sample/` klasörüne koyun:**
+   ```powershell
+   # Klasör otomatik oluşturulur, veya manuel oluşturabilirsiniz
+   mkdir georeferans_sample
+   
+   # Referans dosyalarını kopyalayın
+   # Örnek:
+   # - ana_harita_urgup_30_cm__Georefference_utm.tif
+   # - ana_harita_karlik_30_cm_bingmap_Georeferans.tif
+   ```
+
+2. **Modelleri `modeller/` klasörüne koyun** (opsiyonel - model yoksa sadece bölme ve birleştirme yapar)
+
+3. **Script içinde varsayılan görüntü dosyasını ayarlayın** (veya parametre ile belirtin)
+
+#### Kullanım
+
+```powershell
+# Parametre olmadan çalıştırma (varsayılan değerlerle)
+python goruntu_islemleri.py
+
+# Veya parametre ile:
+python goruntu_islemleri.py split -i image.tif
+python goruntu_islemleri.py merge -i parcalar -o merged.jpg
+python goruntu_islemleri.py georef -i image.jpg -r reference.tif -o geo.tif
+```
+
+#### Varsayılan Değerler
+
+Script içinde (`if __name__ == "__main__":` bölümünde) varsayılan değerler ayarlanabilir:
+
+```python
+DEFAULT_INPUT_IMAGE = "karlik_30_cm_bingmap_utm.tif"
+DEFAULT_MODEL_DIR = "modeller"
+DEFAULT_REFERENCE_DIR = "georeferans_sample"
+```
+
+#### İşlem Akışı
+
+1. **Bölme**: Görüntüyü `bolunmus/bolunmus/<görüntü_adı>/` klasörüne böler
+   - Klasör varsa ve içinde dosyalar varsa bölme atlanır
+   - Metadata kaydedilir (`metadata.json`)
+
+2. **Model Inference**: `modeller/` klasöründeki tüm modelleri kullanarak inference yapar
+   - Her model için ayrı çıktı klasörü: `parcalar/<görüntü_adı>/<model_adı>/`
+   - Threading ile hızlı işleme
+
+3. **Birleştirme**: Her model için ayrı birleştirme yapar
+   - Çıktı: `ana_haritalar/ana_harita_<görüntü_adı>_<model_adı>.jpg`
+
+4. **Jeoreferanslama**: Görüntü adına göre otomatik referans bulur ve jeoreferanslar
+   - Referans: `georeferans_sample/` klasöründen otomatik seçilir
+   - Çıktı: `georefli/harita/<dosya_adı>_geo.tif`
+
+#### Referans Raster Eşleştirme
+
+Script görüntü dosya adından anahtar kelimeleri çıkarır ve en uygun referansı bulur:
+
+- **Eşleştirme Puanlama:**
+  - Anahtar kelime eşleşmesi (urgup, karlik): +20 puan
+  - "ana_harita" ile başlayan dosyalar: +10 puan
+  - "georef", "reference" kelimeleri: +5 puan
+  - "utm" kelimesi: +3 puan
+
+**Örnek:**
+- Görüntü: `urgup_bingmap_30cm_utm.tif`
+- Referans: `ana_harita_urgup_30_cm__Georefference_utm.tif`
+- Puan: 20 (urgup) + 10 (ana_harita) + 5 (georef) + 3 (utm) = **38 puan** ✅
+
+#### Çıktı Örneği
+
+```
+============================================================
+PARAMETRE VERİLMEDİ, VARSAYILAN DEĞERLERLE TAM PİPELİNE ÇALIŞTIRILIYOR
+============================================================
+============================================================
+1. ADIM: Görüntü Bölme
+============================================================
+Parçalar bölünüyor: 100%|████████████| 2640/2640 [00:45<00:00, 58.2parça/s]
+✓ Bölme tamamlandı: 2640 parça
+
+============================================================
+2. ADIM: Model Inference
+============================================================
+Model inference: 100%|████████████| 2640/2640 [05:23<00:00, 8.2görüntü/s]
+✓ Model model1 tamamlandı
+
+============================================================
+3. ADIM: Görüntü Birleştirme
+============================================================
+✓ Birleştirme tamamlandı: ana_haritalar/ana_harita_karlik_30_cm_bingmap_utm_model1.jpg
+
+============================================================
+4. ADIM: Jeoreferanslama
+============================================================
+Referans dizininde 2 dosya bulundu: georeferans_sample
+✓ Referans raster bulundu: ana_harita_karlik_30_cm_bingmap_Georeferans.tif (eşleşme puanı: 38)
+  Görüntü: karlik_30_cm_bingmap_utm.tif
+  Referans: ana_harita_karlik_30_cm_bingmap_Georeferans.tif
+Jeoreferanslama: 100%|████████████| 1/1 [00:12<00:00, 12.3s/dosya]
+✓ Jeoreferanslama tamamlandı
+```
+
+---
 
 ### 1. Veri Hazırlama (Karo Üretimi)
 
@@ -336,7 +473,23 @@ python "harita_uretici_beta_gpt_hizli_3_kanal_to_1_kanal.py"
 
 Mozaiklenmiş çıktı `.jpg` dosyalarını bir referans GeoTIFF'in CRS ve transform'u ile jeoreferanslayın.
 
-#### Yapılandırma
+#### Yöntem 1: goruntu_islemleri.py ile (Önerilen ⭐)
+
+**Otomatik referans seçimi** ile çalışır. Referans dosyalarını `georeferans_sample/` klasörüne koyun.
+
+```powershell
+# Tam pipeline ile (otomatik jeoreferanslama dahil)
+python goruntu_islemleri.py
+
+# Sadece jeoreferanslama
+python goruntu_islemleri.py georef -i image.jpg
+# Referans otomatik bulunur, veya manuel belirtilebilir:
+python goruntu_islemleri.py georef -i image.jpg -r reference.tif -o geo.tif
+```
+
+#### Yöntem 2: Eski Script'ler ile
+
+**Yapılandırma:**
 
 1. **Referans raster yolunu script içinde ayarlayın:**
    ```python
@@ -348,7 +501,7 @@ Mozaiklenmiş çıktı `.jpg` dosyalarını bir referans GeoTIFF'in CRS ve trans
    # - karlik_30_cm_bingmap_utm_georefference.tif
    ```
 
-#### Çalıştırma
+**Çalıştırma:**
 
 ```powershell
 python "georef_gpt.py"
@@ -390,7 +543,10 @@ python "georef_gpt-ertugrul.py"
 | **Çıkarım model klasörü** | Çıkarım script'leri | `modeller/` |
 | **Ara çıktı klasörü** | Çıkarım script'leri | `c:/d_surucusu/parcalar/` (geçici parça çıktıları) |
 | **Final çıktı klasörleri** | Script'ler | `ana_haritalar/`, `georefli/` |
-| **Referans raster** | Jeoreferans script'leri | Script içinde hardcoded, değiştirilmesi gerekir |
+| **Referans raster klasörü** | `goruntu_islemleri.py` | `georeferans_sample/` (otomatik referans seçimi) |
+| **Referans raster** | Eski jeoreferans script'leri | Script içinde hardcoded, değiştirilmesi gerekir |
+| **Progress bar** | `goruntu_islemleri.py` | tqdm ile otomatik (yoksa basit fallback) |
+| **Akıllı bölme atlama** | `goruntu_islemleri.py` | Klasör varsa bölme atlanır |
 
 ### Öneri
 
@@ -484,7 +640,33 @@ Yolları ve parametreleri merkezi bir `config.yaml` dosyasına almak taşınabil
 
 ## 🎯 Hızlı Başlangıç
 
-### Adım 1: Karo Üretimi
+### ⭐ Yöntem 1: Tek Komutla Tüm İşlemler (Önerilen)
+
+```powershell
+# 1. Referans raster dosyalarını georeferans_sample/ klasörüne koyun
+mkdir georeferans_sample
+# Referans dosyalarını kopyalayın (örn: ana_harita_urgup_30_cm__Georefference_utm.tif)
+
+# 2. Modelleri modeller/ klasörüne koyun (opsiyonel)
+
+# 3. Script içinde varsayılan görüntü dosyasını ayarlayın
+#    veya parametre ile belirtin
+
+# 4. Çalıştırın
+python goruntu_islemleri.py
+```
+
+**Çıktılar:**
+- Bölünmüş parçalar: `bolunmus/bolunmus/<görüntü_adı>/`
+- Model çıktıları: `parcalar/<görüntü_adı>/<model_adı>/`
+- Birleştirilmiş görüntüler: `ana_haritalar/`
+- Jeoreferanslı görüntüler: `georefli/harita/`
+
+---
+
+### Yöntem 2: Adım Adım (Eski Yöntem)
+
+#### Adım 1: Karo Üretimi
 
 ```powershell
 # goruntu bolme.py içinde path değişkenini kaynak TIF'e ayarlayın
@@ -497,7 +679,7 @@ python "goruntu bolme.py"
 
 ---
 
-### Adım 2: Eğitim (Opsiyonel)
+#### Adım 2: Eğitim (Opsiyonel)
 
 ```powershell
 # Veri kökünü eğitim script'inde all_image_paths değişkenine ayarlayın
@@ -508,7 +690,7 @@ python "autoencoder_dinamik_bellek_dosyadan_okuma_tf.data_renkli.py"
 
 ---
 
-### Adım 3: Çıkarım + Birleştirme
+#### Adım 3: Çıkarım + Birleştirme
 
 ```powershell
 # Modelleri modeller/ klasörüne koyun
@@ -521,7 +703,7 @@ python "harita_uretici_beta_gpt_hizli.py"
 
 ---
 
-### Adım 4: Jeoreferans/GeoTIFF
+#### Adım 4: Jeoreferans/GeoTIFF
 
 ```powershell
 # Referans raster yolunu script içinde ayarlayın

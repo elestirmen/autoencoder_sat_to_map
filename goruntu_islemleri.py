@@ -106,15 +106,20 @@ class ImageProcessor:
         
         Args:
             image_filename: Görüntü dosya adı (örn: "karlik_30_cm_bingmap_utm.tif")
-            reference_dir: Referans dosyalarının bulunduğu dizin
+            reference_dir: Referans dosyalarının bulunduğu dizin (varsayılan: "georeferans_sample")
             
         Returns:
             Bulunan referans raster yolu veya None
         """
         if reference_dir is None:
-            reference_dir = self.reference_dir
+            # Varsayılan olarak georeferans_sample klasörünü kullan
+            reference_dir = "georeferans_sample"
+            # Eğer yoksa mevcut dizini dene
+            if not os.path.exists(reference_dir):
+                reference_dir = self.reference_dir
         
         if not os.path.exists(reference_dir):
+            logger.warning(f"Referans dizini bulunamadı: {reference_dir}")
             return None
         
         # Görüntü adından anahtar kelimeleri çıkar
@@ -139,7 +144,10 @@ class ImageProcessor:
                 return reference_dir
         
         if len(reference_files) == 0:
+            logger.warning(f"Referans dizininde dosya bulunamadı: {reference_dir}")
             return None
+        
+        logger.info(f"Referans dizininde {len(reference_files)} dosya bulundu: {reference_dir}")
         
         # Anahtar kelimelere göre eşleşme bul
         best_match = None
@@ -149,14 +157,22 @@ class ImageProcessor:
             ref_lower = ref_file.lower()
             score = 0
             
-            # Anahtar kelimeler için puan ver
+            # Anahtar kelimeler için puan ver (daha yüksek öncelik)
             for keyword in keywords:
                 if keyword in ref_lower:
-                    score += 10
+                    score += 20  # Daha yüksek puan
+            
+            # "ana_harita" ile başlayan dosyalar için ekstra puan (standart format)
+            if ref_lower.startswith('ana_harita'):
+                score += 10
             
             # "georef", "georeference", "reference" gibi kelimeler için ekstra puan
-            if any(word in ref_lower for word in ['georef', 'reference', 'utm']):
+            if any(word in ref_lower for word in ['georef', 'reference']):
                 score += 5
+            
+            # "utm" kelimesi için ekstra puan
+            if 'utm' in ref_lower:
+                score += 3
             
             if score > best_score:
                 best_score = score
@@ -164,7 +180,9 @@ class ImageProcessor:
         
         if best_match:
             ref_path = os.path.join(reference_dir, best_match)
-            logger.info(f"Referans raster bulundu: {best_match} (eşleşme puanı: {best_score})")
+            logger.info(f"✓ Referans raster bulundu: {best_match} (eşleşme puanı: {best_score})")
+            logger.info(f"  Görüntü: {os.path.basename(image_filename)}")
+            logger.info(f"  Referans: {best_match}")
             return ref_path
         
         # Eşleşme yoksa ilk referans dosyasını kullan
@@ -1121,14 +1139,14 @@ class ImageProcessor:
                 selected_reference = reference_raster
                 logger.info(f"Manuel referans kullanılıyor: {os.path.basename(selected_reference)}")
             else:
-                # Görüntü adına göre referans bul
-                selected_reference = self.find_reference_raster(input_image, reference_dir=".")
+                # Görüntü adına göre referans bul (georeferans_sample klasöründen)
+                selected_reference = self.find_reference_raster(input_image, reference_dir="georeferans_sample")
                 
                 if not selected_reference:
                     logger.warning("Referans raster bulunamadı, jeoreferanslama atlanıyor...")
-                    logger.info("İpucu: Referans raster dosyasını görüntü ile aynı dizine koyun veya reference_raster parametresi ile belirtin.")
+                    logger.info("İpucu: Referans raster dosyalarını 'georeferans_sample' klasörüne koyun veya reference_raster parametresi ile belirtin.")
                 else:
-                    logger.info(f"Otomatik referans bulundu: {os.path.basename(selected_reference)}")
+                    logger.info(f"✓ Otomatik referans bulundu: {os.path.basename(selected_reference)}")
             
             if selected_reference and os.path.exists(selected_reference):
                 # Birleştirilmiş görüntüleri jeoreferansla
@@ -1424,7 +1442,8 @@ if __name__ == "__main__":
     #DEFAULT_INPUT_IMAGE = "urgup_bingmap_30cm_utm.tif"
     DEFAULT_INPUT_IMAGE = "karlik_30_cm_bingmap_utm.tif"
     DEFAULT_MODEL_DIR = "modeller"
-    DEFAULT_REFERENCE_RASTER = "ana_harita_urgup_30_cm__Georefference_utm.tif"
+    DEFAULT_REFERENCE_DIR = "georeferans_sample"  # Referans dosyalarının bulunduğu klasör
+    DEFAULT_REFERENCE_RASTER = None  # None ise otomatik bulunur
     
     # Eğer hiç argüman verilmemişse, varsayılan değerlerle tam pipeline çalıştır
     if len(sys.argv) == 1:
@@ -1432,9 +1451,26 @@ if __name__ == "__main__":
         logger.info("PARAMETRE VERİLMEDİ, VARSAYILAN DEĞERLERLE TAM PİPELİNE ÇALIŞTIRILIYOR")
         logger.info("=" * 60)
         
-        processor = ImageProcessor()
+        processor = ImageProcessor(reference_dir=DEFAULT_REFERENCE_DIR)
+        
+        # Georeferans_sample klasörünü oluştur (eğer yoksa)
+        if not os.path.exists(DEFAULT_REFERENCE_DIR):
+            logger.info(f"'{DEFAULT_REFERENCE_DIR}' klasörü oluşturuluyor...")
+            os.makedirs(DEFAULT_REFERENCE_DIR, exist_ok=True)
+            logger.info(f"✓ '{DEFAULT_REFERENCE_DIR}' klasörü oluşturuldu.")
+            logger.info(f"  Lütfen referans raster dosyalarını bu klasöre koyun.")
+            logger.info(f"  Örnek: ana_harita_urgup_30_cm__Georefference_utm.tif")
+            logger.info(f"         ana_harita_karlik_30_cm_bingmap_Georeferans.tif")
         
         try:
+            # Referans raster'ı belirle
+            reference_raster = None
+            if DEFAULT_REFERENCE_RASTER and os.path.exists(DEFAULT_REFERENCE_RASTER):
+                reference_raster = DEFAULT_REFERENCE_RASTER
+            else:
+                # Otomatik bul (georeferans_sample klasöründen)
+                reference_raster = processor.find_reference_raster(DEFAULT_INPUT_IMAGE, DEFAULT_REFERENCE_DIR)
+            
             # Tam pipeline'ı çalıştır
             results = processor.run_full_pipeline(
                 input_image=DEFAULT_INPUT_IMAGE,
@@ -1444,7 +1480,7 @@ if __name__ == "__main__":
                 split_output_dir="bolunmus/bolunmus",
                 processed_output_dir="parcalar",
                 merge_output_dir="ana_haritalar",
-                reference_raster=DEFAULT_REFERENCE_RASTER if os.path.exists(DEFAULT_REFERENCE_RASTER) else None,
+                reference_raster=reference_raster,
                 georef_output_dir="georefli/harita",
                 crop_overlap=16,
                 image_size=(544, 544),
