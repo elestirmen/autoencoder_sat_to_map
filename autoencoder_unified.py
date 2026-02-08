@@ -130,6 +130,16 @@ class Config:
     # Prefetch buffer boyutu (None = AUTOTUNE)
     PREFETCH_BUFFER = None
     
+    # Dosya doğrulama modu:
+    # "none": Doğrulama yapma (en hızlı, ignore_errors ile hatalar atlanır)
+    # "quick": Sadece dosya boyutu kontrolü (hızlı)
+    # "cached": İlk sefer doğrula, sonucu cache'le (400k dosya için önerilen)
+    # "full": Her seferinde tam doğrulama (yavaş)
+    VALIDATE_FILES = "cached"
+    
+    # Cache dosyası adı (VALIDATE_FILES="cached" için)
+    VALIDATION_CACHE_FILE = "valid_files_cache.json"
+    
     # ------------------------------ GELİŞMİŞ AYARLAR --------------------------
     # Early stopping (0 = devre dışı)
     EARLY_STOPPING_PATIENCE = 0
@@ -301,44 +311,138 @@ def load_and_preprocess_multiscale(image_path):
     return (input_img, label_img)
 
 
-def validate_image_files(image_paths):
-    """Bozuk veya boş görüntü dosyalarını tespit eder ve geçerli olanları döndürür."""
-    valid_paths = []
-    invalid_paths = []
-    
-    print("Görüntü dosyaları doğrulanıyor...")
+import json
+import hashlib
+
+
+def get_cache_path():
+    """Cache dosyasının tam yolunu döndürür."""
+    cache_dir = Config.DATA_DIR
+    return os.path.join(cache_dir, Config.VALIDATION_CACHE_FILE)
+
+
+def compute_dataset_hash(image_paths):
+    """Veri setinin hash'ini hesaplar (dosya listesi + toplam sayı)."""
+    # Sadece dosya adlarını ve toplam sayısını kullan (hızlı)
+    content = f"{len(image_paths)}:{sorted([os.path.basename(p) for p in image_paths[:100]])}"
+    return hashlib.md5(content.encode()).hexdigest()
+
+
+def load_validation_cache():
+    """Cache dosyasını yükler."""
+    cache_path = get_cache_path()
+    if os.path.exists(cache_path):
+        try:
+            with open(cache_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except:
+            pass
+    return None
+
+
+def save_validation_cache(valid_files, dataset_hash):
+    """Doğrulama sonuçlarını cache'e kaydeder."""
+    cache_path = get_cache_path()
+    cache_data = {
+        "hash": dataset_hash,
+        "valid_files": valid_files,
+        "count": len(valid_files),
+        "timestamp": datetime.datetime.now().isoformat()
+    }
+    try:
+        with open(cache_path, 'w', encoding='utf-8') as f:
+            json.dump(cache_data, f)
+        print(f"✅ Doğrulama sonuçları cache'lendi: {cache_path}")
+    except Exception as e:
+        print(f"⚠️ Cache kaydedilemedi: {e}")
+
+
+def validate_quick(image_paths):
+    """Hızlı doğrulama - sadece dosya boyutu kontrolü."""
+    valid = []
+    invalid_count = 0
     
     for path in image_paths:
         try:
-            # Dosya boyutunu kontrol et
+            if os.path.getsize(path) > 0:
+                valid.append(path)
+            else:
+                invalid_count += 1
+        except:
+            invalid_count += 1
+    
+    if invalid_count > 0:
+        print(f"⚠️ {invalid_count} boş/erişilemeyen dosya atlandı")
+    
+    return valid
+
+
+def validate_full(image_paths):
+    """Tam doğrulama - header kontrolü dahil."""
+    valid_paths = []
+    invalid_count = 0
+    total = len(image_paths)
+    
+    print("Tam doğrulama yapılıyor...")
+    
+    for i, path in enumerate(image_paths):
+        # Progress her 10000 dosyada bir göster
+        if i > 0 and i % 10000 == 0:
+            print(f"  İşleniyor: {i}/{total} ({i*100//total}%)")
+        
+        try:
             file_size = os.path.getsize(path)
-            if file_size == 0:
-                invalid_paths.append((path, "Boş dosya (0 byte)"))
+            if file_size < 100:  # 100 byte'tan küçük dosyalar şüpheli
+                invalid_count += 1
                 continue
-            
-            # Dosyayı okumayı dene (ilk birkaç byte)
-            with open(path, 'rb') as f:
-                header = f.read(16)
-                if len(header) < 8:
-                    invalid_paths.append((path, "Dosya çok küçük"))
-                    continue
-            
             valid_paths.append(path)
-            
-        except Exception as e:
-            invalid_paths.append((path, str(e)))
+        except:
+            invalid_count += 1
     
-    # Bozuk dosyaları raporla
-    if invalid_paths:
-        print(f"\n⚠️  {len(invalid_paths)} bozuk/boş dosya tespit edildi:")
-        for path, reason in invalid_paths[:10]:  # İlk 10 tanesini göster
-            print(f"   - {os.path.basename(path)}: {reason}")
-        if len(invalid_paths) > 10:
-            print(f"   ... ve {len(invalid_paths) - 10} dosya daha")
-        print()
+    if invalid_count > 0:
+        print(f"⚠️ {invalid_count} bozuk/boş dosya atlandı")
     
-    print(f"Geçerli görüntü sayısı: {len(valid_paths)} / {len(image_paths)}")
     return valid_paths
+
+
+def get_validated_paths(all_image_paths):
+    """Doğrulama moduna göre geçerli dosyaları döndürür."""
+    mode = Config.VALIDATE_FILES.lower()
+    
+    if mode == "none":
+        print("📌 Dosya doğrulama: DEVRE DIŞI (ignore_errors aktif)")
+        return all_image_paths
+    
+    elif mode == "quick":
+        print("📌 Dosya doğrulama: HIZLI (sadece boyut kontrolü)")
+        return validate_quick(all_image_paths)
+    
+    elif mode == "cached":
+        print("📌 Dosya doğrulama: CACHE MODUNDA")
+        cache = load_validation_cache()
+        dataset_hash = compute_dataset_hash(all_image_paths)
+        
+        if cache and cache.get("hash") == dataset_hash:
+            print(f"✅ Cache'den yüklendi: {cache['count']} geçerli dosya")
+            # Cache'deki dosyaların hala var olduğunu kontrol et
+            valid_from_cache = [p for p in cache["valid_files"] if os.path.exists(p)]
+            if len(valid_from_cache) == cache['count']:
+                return valid_from_cache
+            print("⚠️ Bazı dosyalar silinmiş, yeniden doğrulanıyor...")
+        
+        # Cache yoksa veya geçersizse, hızlı doğrulama yap ve cache'le
+        print("🔄 İlk kez doğrulama yapılıyor (bu sadece bir kez olacak)...")
+        valid_paths = validate_quick(all_image_paths)
+        save_validation_cache(valid_paths, dataset_hash)
+        return valid_paths
+    
+    elif mode == "full":
+        print("📌 Dosya doğrulama: TAM (her dosya kontrol ediliyor)")
+        return validate_full(all_image_paths)
+    
+    else:
+        print(f"⚠️ Bilinmeyen doğrulama modu: {mode}, 'none' kullanılıyor")
+        return all_image_paths
 
 
 def create_datasets():
@@ -355,8 +459,8 @@ def create_datasets():
     
     print(f"Toplam dosya sayısı: {len(all_image_paths)}")
     
-    # Bozuk dosyaları filtrele
-    all_image_paths = validate_image_files(all_image_paths)
+    # Doğrulama moduna göre filtreleme
+    all_image_paths = get_validated_paths(all_image_paths)
     
     if len(all_image_paths) == 0:
         raise ValueError("Hiç geçerli görüntü dosyası bulunamadı!")

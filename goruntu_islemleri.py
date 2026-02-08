@@ -227,11 +227,11 @@ CONFIG = {
         "image_size": (544, 544),
 
         # Modelin renk modu.
-        #   "grayscale": 1 kanallı gri tonlamalı giriş/çıkış.
-        #                Ek histogram eşitleme uygulanmaz.
-        #   "rgb":       3 kanallı renkli giriş/çıkış.
-        #                BGR↔RGB dönüşümü otomatik yapılır.
-        "color_mode": "grayscale",
+        #   "auto":      Model kanal sayısından otomatik algıla (ÖNERİLEN)
+        #                1 kanal → grayscale, 3 kanal → rgb
+        #   "grayscale": 1 kanal gri tonlama (otomatik algılamayı EZER)
+        #   "rgb":       3 kanal renkli (otomatik algılamayı EZER)
+        "color_mode": "auto",
 
         # Batch inference boyutu. Aynı anda kaç karonun GPU'ya verileceği.
         # Büyük değer → hızlı ama çok GPU belleği gerektirir.
@@ -1208,6 +1208,54 @@ class ImageProcessor:
                 raise ValueError(f"Model yüklenemedi: {e}")
         
         logger.info("Model yüklendi.")
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # RENK MODU BELİRLEME
+        # "auto" → model kanal sayısından otomatik algıla
+        # "grayscale" veya "rgb" → kullanıcının belirlediği değer (ezme)
+        # ═══════════════════════════════════════════════════════════════════════
+        try:
+            input_shape = model.input_shape
+            output_shape = model.output_shape
+            
+            # Kanal sayısını al (son boyut)
+            input_channels = input_shape[-1] if input_shape[-1] is not None else None
+            output_channels = output_shape[-1] if output_shape[-1] is not None else None
+            
+            logger.info(f"Model input shape: {input_shape}")
+            logger.info(f"Model output shape: {output_shape}")
+            
+            # Kanal sayısına göre algılanan modu belirle
+            if input_channels == 1 or output_channels == 1:
+                detected_mode = "grayscale"
+            elif input_channels == 3 or output_channels == 3:
+                detected_mode = "rgb"
+            else:
+                detected_mode = None
+            
+            # color_mode belirleme mantığı
+            if color_mode == "auto":
+                # Otomatik algılama modu
+                if detected_mode:
+                    logger.info(f"📌 Color mode otomatik algılandı: '{detected_mode}' (model kanal: {input_channels})")
+                    color_mode = detected_mode
+                else:
+                    logger.warning("Color mode algılanamadı, varsayılan 'rgb' kullanılıyor.")
+                    color_mode = "rgb"
+            else:
+                # Kullanıcı belirli bir mod seçmiş (ezme)
+                if detected_mode and detected_mode != color_mode:
+                    logger.warning(f"⚠️  Model kanal sayısı ({input_channels}) ile color_mode '{color_mode}' uyumsuz!")
+                    logger.warning(f"   Model '{detected_mode}' bekliyor. Yine de '{color_mode}' kullanılacak.")
+                else:
+                    logger.info(f"✓ Color mode: '{color_mode}' (kullanıcı tarafından belirlendi)")
+        except Exception as e:
+            if color_mode == "auto":
+                logger.warning(f"Color mode otomatik algılanamadı, varsayılan 'rgb' kullanılıyor.")
+                color_mode = "rgb"
+            else:
+                logger.info(f"Color mode: '{color_mode}' (kullanıcı tarafından belirlendi)")
+            logger.debug(f"Algılama hatası: {e}")
         
         # Dosyaları listele ve sırala
         files = [f for f in os.listdir(input_dir) 
