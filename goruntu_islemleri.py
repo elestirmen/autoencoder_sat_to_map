@@ -19,6 +19,62 @@ from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Any
 import re
 
+# Central config: manage all default parameters from one place.
+CONFIG = {
+    "opencv": {
+        "max_image_pixels": 2 ** 40,
+    },
+    "reference": {
+        "default_dir": "georeferans_sample",
+        "auto_match_keywords": ["urgup", "karlik", "kapadokya", "bern"],
+    },
+    "split": {
+        "input_image": "urgup_bingmap_30cm_utm.tif",
+        "output_dir": "bolunmus/bolunmus",
+        "frame_size": 512,
+        "overlap": 32,
+        "prefix": "goruntu",
+        "format": "jpg",
+        "save_metadata": False,
+        "visualize": False,
+        "show_progress": True,
+        "keep_in_memory": True,
+    },
+    "merge": {
+        "input_dir": "parcalar",
+        "output": "birlestirilmis.jpg",
+        "crop_overlap": 0,
+        "frame_size": None,
+        "sort_files": True,
+    },
+    "pipeline": {
+        "model_dir": "modeller",
+        "model_path": None,
+        "split_frame_size": 512,
+        "split_overlap": 32,
+        "split_output_dir": "bolunmus/bolunmus",
+        "processed_output_dir": "parcalar",
+        "merge_output_dir": "ana_haritalar",
+        "georef_output_dir": "georefli/harita",
+        "crop_overlap": 16,
+        "image_size": (544, 544),
+        "color_mode": "grayscale",
+        "batch_size": 16,
+        "reference_dir": "georeferans_sample",
+        "reference_raster": None,
+    },
+    "georef": {
+        "input": None,
+        "input_dir": "ana_haritalar",
+        "reference": "ana_harita_urgup_30_cm__Georefference_utm.tif",
+        "output": None,
+        "output_dir": "georefli/harita",
+        "band": 1,
+        "compress": "LZW",
+        "nodata": None,
+    },
+}
+
 # Progress bar için tqdm
 try:
     from tqdm import tqdm
@@ -55,7 +111,7 @@ except ImportError:
             self.desc = desc
 
 # OpenCV için maksimum görüntü piksel limitini ayarla
-os.environ["OPENCV_IO_MAX_IMAGE_PIXELS"] = str(pow(2, 40))
+os.environ["OPENCV_IO_MAX_IMAGE_PIXELS"] = str(CONFIG["opencv"]["max_image_pixels"])
 
 import cv2
 import numpy as np
@@ -111,7 +167,7 @@ class ImageProcessor:
         """
         if reference_dir is None:
             # Varsayılan olarak georeferans_sample klasörünü kullan
-            reference_dir = "georeferans_sample"
+            reference_dir = CONFIG["reference"]["default_dir"]
             # Eğer yoksa mevcut dizini dene
             if not os.path.exists(reference_dir):
                 reference_dir = self.reference_dir
@@ -125,7 +181,7 @@ class ImageProcessor:
         
         # Anahtar kelimeleri bul (urgup, karlik, vb.)
         keywords = []
-        common_names = ['urgup', 'karlik', 'kapadokya', 'bern']
+        common_names = CONFIG["reference"]["auto_match_keywords"]
         for name in common_names:
             if name in base_name:
                 keywords.append(name)
@@ -254,15 +310,15 @@ class ImageProcessor:
     def split_image(
         self,
         img: np.ndarray,
-        frame_size: int = 512,
-        overlap: int = 32,
-        output_dir: str = 'bolunmus/bolunmus',
-        prefix: str = 'goruntu',
-        format: str = 'jpg',
-        save_metadata: bool = False,
+        frame_size: int = CONFIG["split"]["frame_size"],
+        overlap: int = CONFIG["split"]["overlap"],
+        output_dir: str = CONFIG["split"]["output_dir"],
+        prefix: str = CONFIG["split"]["prefix"],
+        format: str = CONFIG["split"]["format"],
+        save_metadata: bool = CONFIG["split"]["save_metadata"],
         original_path: Optional[str] = None,
-        show_progress: bool = True,
-        keep_in_memory: bool = True
+        show_progress: bool = CONFIG["split"]["show_progress"],
+        keep_in_memory: bool = CONFIG["split"]["keep_in_memory"]
     ) -> Tuple[List[np.ndarray], List[str], Dict[str, Any]]:
         """
         Görüntüyü küçük parçalara böler.
@@ -370,9 +426,9 @@ class ImageProcessor:
         output_path: str,
         num_frames_x: Optional[int] = None,
         num_frames_y: Optional[int] = None,
-        crop_overlap: int = 0,
-        frame_size: Optional[int] = None,
-        sort_files: bool = True
+        crop_overlap: int = CONFIG["merge"]["crop_overlap"],
+        frame_size: Optional[int] = CONFIG["merge"]["frame_size"],
+        sort_files: bool = CONFIG["merge"]["sort_files"]
     ) -> np.ndarray:
         """
         Parçalara bölünmüş görüntüleri birleştirir.
@@ -531,9 +587,9 @@ class ImageProcessor:
         input_path: str,
         reference_path: str,
         output_path: str,
-        band: int = 1,
-        compress: str = 'LZW',
-        nodata: Optional[float] = None
+        band: int = CONFIG["georef"]["band"],
+        compress: str = CONFIG["georef"]["compress"],
+        nodata: Optional[float] = CONFIG["georef"]["nodata"]
     ) -> None:
         """
         Görüntüyü referans raster'ın coğrafi bilgileriyle jeoreferanslar.
@@ -682,9 +738,9 @@ class ImageProcessor:
         input_dir: str,
         output_dir: str,
         model_path: str,
-        image_size: Tuple[int, int] = (544, 544),
-        color_mode: str = "grayscale",
-        batch_size: int = 16
+        image_size: Tuple[int, int] = CONFIG["pipeline"]["image_size"],
+        color_mode: str = CONFIG["pipeline"]["color_mode"],
+        batch_size: int = CONFIG["pipeline"]["batch_size"]
     ) -> List[str]:
         """
         Parçalara bölünmüş görüntüleri sinir ağı modelinden batch inference ile geçirir.
@@ -824,19 +880,19 @@ class ImageProcessor:
     def run_full_pipeline(
         self,
         input_image: str,
-        model_path: Optional[str] = None,
-        model_dir: Optional[str] = None,
-        split_frame_size: int = 512,
-        split_overlap: int = 32,
-        split_output_dir: str = "bolunmus/bolunmus",
-        processed_output_dir: str = "parcalar",
-        merge_output_dir: str = "ana_haritalar",
-        reference_raster: Optional[str] = None,
-        georef_output_dir: str = "georefli/harita",
-        crop_overlap: int = 16,
-        image_size: Tuple[int, int] = (544, 544),
-        color_mode: str = "grayscale",
-        batch_size: int = 16
+        model_path: Optional[str] = CONFIG["pipeline"]["model_path"],
+        model_dir: Optional[str] = CONFIG["pipeline"]["model_dir"],
+        split_frame_size: int = CONFIG["pipeline"]["split_frame_size"],
+        split_overlap: int = CONFIG["pipeline"]["split_overlap"],
+        split_output_dir: str = CONFIG["pipeline"]["split_output_dir"],
+        processed_output_dir: str = CONFIG["pipeline"]["processed_output_dir"],
+        merge_output_dir: str = CONFIG["pipeline"]["merge_output_dir"],
+        reference_raster: Optional[str] = CONFIG["pipeline"]["reference_raster"],
+        georef_output_dir: str = CONFIG["pipeline"]["georef_output_dir"],
+        crop_overlap: int = CONFIG["pipeline"]["crop_overlap"],
+        image_size: Tuple[int, int] = CONFIG["pipeline"]["image_size"],
+        color_mode: str = CONFIG["pipeline"]["color_mode"],
+        batch_size: int = CONFIG["pipeline"]["batch_size"]
     ) -> Dict[str, Any]:
         """
         Tüm işlemleri sırayla çalıştırır: Böl -> Model Inference -> Birleştir -> Jeoreferansla
@@ -1154,11 +1210,15 @@ class ImageProcessor:
                 logger.info(f"Manuel referans kullanılıyor: {os.path.basename(selected_reference)}")
             else:
                 # Görüntü adına göre referans bul (georeferans_sample klasöründen)
-                selected_reference = self.find_reference_raster(input_image, reference_dir="georeferans_sample")
+                selected_reference = self.find_reference_raster(
+                    input_image, reference_dir=CONFIG["pipeline"]["reference_dir"]
+                )
                 
                 if not selected_reference:
                     logger.warning("Referans raster bulunamadı, jeoreferanslama atlanıyor...")
-                    logger.info("İpucu: Referans raster dosyalarını 'georeferans_sample' klasörüne koyun veya reference_raster parametresi ile belirtin.")
+                    logger.info(
+                        f"Ipucu: Referans raster dosyalarini '{CONFIG['pipeline']['reference_dir']}' klasorune koyun veya reference_raster parametresi ile belirtin."
+                    )
                 else:
                     logger.info(f"✓ Otomatik referans bulundu: {os.path.basename(selected_reference)}")
             
@@ -1188,8 +1248,9 @@ class ImageProcessor:
                             input_path=merge_file,
                             reference_path=selected_reference,
                             output_path=georef_output_file,
-                            band=1,
-                            compress='LZW'
+                            band=CONFIG["georef"]["band"],
+                            compress=CONFIG["georef"]["compress"],
+                            nodata=CONFIG["georef"]["nodata"],
                         )
                         
                         results['georef'].append({
@@ -1221,185 +1282,180 @@ class ImageProcessor:
 
 
 def main():
-    """Ana fonksiyon - CLI arayüzü ve varsayılan değerlerle çalışma."""
-    
-    # Varsayılan dosya isimleri ve parametreler
-    DEFAULT_INPUT_IMAGE = "urgup_bingmap_30cm_utm.tif"
-    DEFAULT_OUTPUT_DIR = "bolunmus/bolunmus"
-    DEFAULT_MERGE_INPUT_DIR = "parcalar"
-    DEFAULT_MERGE_OUTPUT = "birlestirilmis.jpg"
-    DEFAULT_GEOREF_INPUT_DIR = "ana_haritalar"
-    DEFAULT_GEOREF_REFERENCE = "ana_harita_urgup_30_cm__Georefference_utm.tif"
-    DEFAULT_GEOREF_OUTPUT_DIR = "georefli/harita"
-    
+    """CLI entry point."""
+
+    split_cfg = CONFIG["split"]
+    merge_cfg = CONFIG["merge"]
+    pipeline_cfg = CONFIG["pipeline"]
+    georef_cfg = CONFIG["georef"]
+
     parser = argparse.ArgumentParser(
-        description='Görüntü bölme, birleştirme ve jeoreferanslama işlemleri',
+        description='Goruntu bolme, birlestirme ve jeoreferanslama islemleri',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f"""
-Örnekler:
-  # Tam pipeline (Böl → Inference → Birleştir → Jeoreferansla)
+Ornekler:
+  # Tam pipeline (Bol -> Inference -> Birlestir -> Jeoreferansla)
   python goruntu_islemleri.py pipeline -i image.tif
   python goruntu_islemleri.py pipeline -i image.tif --color_mode rgb --batch_size 8
   python goruntu_islemleri.py pipeline -i image.tif --model_path model.h5 --reference ref.tif
-  
-  # Görüntü bölme (varsayılan: {DEFAULT_INPUT_IMAGE})
+
+  # Goruntu bolme (varsayilan: {split_cfg['input_image']})
   python goruntu_islemleri.py split
   python goruntu_islemleri.py split -i image.tif -o parcalar --frame_size 512 --overlap 32
-  
-  # Görüntü birleştirme (varsayılan: {DEFAULT_MERGE_INPUT_DIR} -> {DEFAULT_MERGE_OUTPUT})
+
+  # Goruntu birlestirme (varsayilan: {merge_cfg['input_dir']} -> {merge_cfg['output']})
   python goruntu_islemleri.py merge
   python goruntu_islemleri.py merge -i parcalar -o merged.jpg --num_frames_x 10 --num_frames_y 10
-  
-  # Jeoreferanslama (varsayılan: {DEFAULT_GEOREF_INPUT_DIR} dizinindeki tüm dosyalar)
+
+  # Jeoreferanslama (varsayilan: {georef_cfg['input_dir']} dizinindeki tum dosyalar)
   python goruntu_islemleri.py georef
   python goruntu_islemleri.py georef -i image.jpg -r reference.tif -o geo.tif
         """
     )
-    
-    subparsers = parser.add_subparsers(dest='command', help='İşlem tipi')
-    
-    # Split komutu
-    split_parser = subparsers.add_parser('split', help='Görüntüyü parçalara böl')
-    split_parser.add_argument('-i', '--input', default=DEFAULT_INPUT_IMAGE, 
-                             help=f'Giriş görüntü dosyası (varsayılan: {DEFAULT_INPUT_IMAGE})')
-    split_parser.add_argument('-o', '--output_dir', default=DEFAULT_OUTPUT_DIR, 
-                             help=f'Çıktı dizini (varsayılan: {DEFAULT_OUTPUT_DIR})')
-    split_parser.add_argument('--frame_size', type=int, default=512, help='Parça boyutu (piksel)')
-    split_parser.add_argument('--overlap', type=int, default=32, help='Örtüşme miktarı (piksel)')
-    split_parser.add_argument('--prefix', default='goruntu', help='Dosya adı öneki')
-    split_parser.add_argument('--format', default='jpg', choices=['jpg', 'png', 'tif'], help='Çıktı formatı')
-    split_parser.add_argument('--save_metadata', action='store_true', help='Metadata kaydet')
-    split_parser.add_argument('--visualize', action='store_true', help='Görselleştirme oluştur')
-    
-    # Merge komutu
-    merge_parser = subparsers.add_parser('merge', help='Parçaları birleştir')
-    merge_parser.add_argument('-i', '--input_dir', default=DEFAULT_MERGE_INPUT_DIR, 
-                             help=f'Parçaların bulunduğu dizin (varsayılan: {DEFAULT_MERGE_INPUT_DIR})')
-    merge_parser.add_argument('-o', '--output', default=DEFAULT_MERGE_OUTPUT, 
-                             help=f'Çıktı dosyası (varsayılan: {DEFAULT_MERGE_OUTPUT})')
-    merge_parser.add_argument('--num_frames_x', type=int, help='X eksenindeki parça sayısı')
-    merge_parser.add_argument('--num_frames_y', type=int, help='Y eksenindeki parça sayısı')
-    merge_parser.add_argument('--crop_overlap', type=int, default=0, help='Örtüşmeyi kesme miktarı')
-    merge_parser.add_argument('--frame_size', type=int, help='Parça boyutu (otomatik algılanır)')
-    
-    # Pipeline komutu (tüm adımlar: Böl → Inference → Birleştir → Jeoreferansla)
-    pipeline_parser = subparsers.add_parser('pipeline', help='Tam pipeline: Böl → Inference → Birleştir → Jeoreferansla')
-    pipeline_parser.add_argument('-i', '--input', default=DEFAULT_INPUT_IMAGE,
-                                help=f'Giriş görüntü dosyası (varsayılan: {DEFAULT_INPUT_IMAGE})')
-    pipeline_parser.add_argument('--model_dir', default='modeller',
-                                help='Model dosyalarının bulunduğu dizin (varsayılan: modeller)')
-    pipeline_parser.add_argument('--model_path', default=None,
-                                help='Tek model dosyası yolu (model_dir yerine)')
-    pipeline_parser.add_argument('--frame_size', type=int, default=512,
-                                help='Parça boyutu (piksel, varsayılan: 512)')
-    pipeline_parser.add_argument('--overlap', type=int, default=32,
-                                help='Bölme örtüşme miktarı (piksel, varsayılan: 32)')
-    pipeline_parser.add_argument('--crop_overlap', type=int, default=16,
-                                help='Birleştirmede kesilecek örtüşme (piksel, varsayılan: 16)')
-    pipeline_parser.add_argument('--color_mode', default='grayscale',
-                                choices=['grayscale', 'rgb'],
-                                help='Renk modu (varsayılan: grayscale)')
-    pipeline_parser.add_argument('--batch_size', type=int, default=16,
-                                help='Batch boyutu - GPU VRAM\'a göre ayarlayın (varsayılan: 16)')
-    pipeline_parser.add_argument('--reference', default=None,
-                                help='Referans raster dosyası (varsayılan: otomatik seçim)')
-    pipeline_parser.add_argument('--reference_dir', default='georeferans_sample',
-                                help='Referans raster dizini (varsayılan: georeferans_sample)')
-    
-    # Georef komutu
-    georef_parser = subparsers.add_parser('georef', help='Görüntüyü jeoreferansla')
-    georef_parser.add_argument('-i', '--input', default=None, 
-                              help=f'Giriş görüntü dosyası veya dizin (varsayılan: {DEFAULT_GEOREF_INPUT_DIR} dizinindeki tüm dosyalar)')
-    georef_parser.add_argument('-r', '--reference', default=DEFAULT_GEOREF_REFERENCE, 
-                             help=f'Referans GeoTIFF dosyası (varsayılan: {DEFAULT_GEOREF_REFERENCE})')
-    georef_parser.add_argument('-o', '--output', default=None, 
-                              help='Çıktı dosyası veya dizin (varsayılan: otomatik)')
-    georef_parser.add_argument('--band', type=int, default=1, help='Okunacak band numarası')
-    georef_parser.add_argument('--compress', default='LZW', choices=['LZW', 'DEFLATE', 'JPEG', 'NONE'], 
-                              help='Sıkıştırma tipi')
-    georef_parser.add_argument('--nodata', type=float, help='NoData değeri')
-    
+
+    subparsers = parser.add_subparsers(dest='command', help='Islem tipi')
+
+    # Split command
+    split_parser = subparsers.add_parser('split', help='Goruntuyu parcalara bol')
+    split_parser.add_argument(
+        '-i',
+        '--input',
+        default=split_cfg["input_image"],
+        help=f'Giris goruntu dosyasi (varsayilan: {split_cfg["input_image"]})'
+    )
+    split_parser.add_argument(
+        '-o',
+        '--output_dir',
+        default=split_cfg["output_dir"],
+        help=f'Cikti dizini (varsayilan: {split_cfg["output_dir"]})'
+    )
+    split_parser.add_argument('--frame_size', type=int, default=split_cfg["frame_size"], help='Parca boyutu (piksel)')
+    split_parser.add_argument('--overlap', type=int, default=split_cfg["overlap"], help='Ortusme miktari (piksel)')
+    split_parser.add_argument('--prefix', default=split_cfg["prefix"], help='Dosya adi oneki')
+    split_parser.add_argument('--format', default=split_cfg["format"], choices=['jpg', 'png', 'tif'], help='Cikti formati')
+    split_parser.add_argument('--save_metadata', action='store_true', default=split_cfg["save_metadata"], help='Metadata kaydet')
+    split_parser.add_argument('--visualize', action='store_true', default=split_cfg["visualize"], help='Gorsellestirme olustur')
+
+    # Merge command
+    merge_parser = subparsers.add_parser('merge', help='Parcalari birlestir')
+    merge_parser.add_argument(
+        '-i',
+        '--input_dir',
+        default=merge_cfg["input_dir"],
+        help=f'Parcalarin bulundugu dizin (varsayilan: {merge_cfg["input_dir"]})'
+    )
+    merge_parser.add_argument(
+        '-o',
+        '--output',
+        default=merge_cfg["output"],
+        help=f'Cikti dosyasi (varsayilan: {merge_cfg["output"]})'
+    )
+    merge_parser.add_argument('--num_frames_x', type=int, help='X eksenindeki parca sayisi')
+    merge_parser.add_argument('--num_frames_y', type=int, help='Y eksenindeki parca sayisi')
+    merge_parser.add_argument('--crop_overlap', type=int, default=merge_cfg["crop_overlap"], help='Ortusmeyi kesme miktari')
+    merge_parser.add_argument('--frame_size', type=int, default=merge_cfg["frame_size"], help='Parca boyutu (otomatik algilanir)')
+
+    # Pipeline command
+    pipeline_parser = subparsers.add_parser('pipeline', help='Tam pipeline: Bol -> Inference -> Birlestir -> Jeoreferansla')
+    pipeline_parser.add_argument(
+        '-i',
+        '--input',
+        default=split_cfg["input_image"],
+        help=f'Giris goruntu dosyasi (varsayilan: {split_cfg["input_image"]})'
+    )
+    pipeline_parser.add_argument(
+        '--model_dir',
+        default=pipeline_cfg["model_dir"],
+        help=f'Model dosyalarinin bulundugu dizin (varsayilan: {pipeline_cfg["model_dir"]})'
+    )
+    pipeline_parser.add_argument('--model_path', default=pipeline_cfg["model_path"], help='Tek model dosyasi yolu (model_dir yerine)')
+    pipeline_parser.add_argument('--frame_size', type=int, default=pipeline_cfg["split_frame_size"], help='Parca boyutu (piksel)')
+    pipeline_parser.add_argument('--overlap', type=int, default=pipeline_cfg["split_overlap"], help='Bolme ortusme miktari (piksel)')
+    pipeline_parser.add_argument('--crop_overlap', type=int, default=pipeline_cfg["crop_overlap"], help='Birlestirmede kesilecek ortusme (piksel)')
+    pipeline_parser.add_argument('--color_mode', default=pipeline_cfg["color_mode"], choices=['grayscale', 'rgb'], help='Renk modu')
+    pipeline_parser.add_argument('--batch_size', type=int, default=pipeline_cfg["batch_size"], help='Batch boyutu')
+    pipeline_parser.add_argument('--reference', default=pipeline_cfg["reference_raster"], help='Referans raster dosyasi')
+    pipeline_parser.add_argument('--reference_dir', default=pipeline_cfg["reference_dir"], help='Referans raster dizini')
+
+    # Georef command
+    georef_parser = subparsers.add_parser('georef', help='Goruntuyu jeoreferansla')
+    georef_parser.add_argument(
+        '-i',
+        '--input',
+        default=georef_cfg["input"],
+        help=f'Giris goruntu dosyasi veya dizin (varsayilan: {georef_cfg["input_dir"]} dizinindeki tum dosyalar)'
+    )
+    georef_parser.add_argument(
+        '-r',
+        '--reference',
+        default=georef_cfg["reference"],
+        help=f'Referans GeoTIFF dosyasi (varsayilan: {georef_cfg["reference"]})'
+    )
+    georef_parser.add_argument('-o', '--output', default=georef_cfg["output"], help='Cikti dosyasi veya dizin (varsayilan: otomatik)')
+    georef_parser.add_argument('--band', type=int, default=georef_cfg["band"], help='Okunacak band numarasi')
+    georef_parser.add_argument(
+        '--compress',
+        default=georef_cfg["compress"],
+        choices=['LZW', 'DEFLATE', 'JPEG', 'NONE'],
+        help='Sikistirma tipi'
+    )
+    georef_parser.add_argument('--nodata', type=float, default=georef_cfg["nodata"], help='NoData degeri')
+
     args = parser.parse_args()
-    
-    processor = ImageProcessor()
-    
-    # Varsayılan değerleri tekrar tanımla (main fonksiyonu içinde erişilebilir olması için)
-    DEFAULT_INPUT_IMAGE = "urgup_bingmap_30cm_utm.tif"
-    DEFAULT_OUTPUT_DIR = "bolunmus/bolunmus"
-    DEFAULT_MERGE_INPUT_DIR = "parcalar"
-    DEFAULT_MERGE_OUTPUT = "birlestirilmis.jpg"
-    DEFAULT_GEOREF_INPUT_DIR = "ana_haritalar"
-    DEFAULT_GEOREF_REFERENCE = "ana_harita_urgup_30_cm__Georefference_utm.tif"
-    DEFAULT_GEOREF_OUTPUT_DIR = "georefli/harita"
-    
-    # Eğer komut belirtilmemişse varsayılan olarak split yap
+    processor = ImageProcessor(reference_dir=pipeline_cfg["reference_dir"])
+
     if not args.command:
         args.command = 'split'
-        # Split için gerekli argümanları varsayılan değerlerle ekle
-        if not hasattr(args, 'input'):
-            args.input = DEFAULT_INPUT_IMAGE
-        if not hasattr(args, 'output_dir'):
-            args.output_dir = DEFAULT_OUTPUT_DIR
-        if not hasattr(args, 'frame_size'):
-            args.frame_size = 512
-        if not hasattr(args, 'overlap'):
-            args.overlap = 32
-        if not hasattr(args, 'prefix'):
-            args.prefix = 'goruntu'
-        if not hasattr(args, 'format'):
-            args.format = 'jpg'
-        if not hasattr(args, 'save_metadata'):
-            args.save_metadata = False
-        if not hasattr(args, 'visualize'):
-            args.visualize = False
-        logger.info("Komut belirtilmedi, varsayılan olarak 'split' işlemi yapılıyor...")
-        logger.info(f"Varsayılan dosya: {args.input}")
-    
+        args.input = split_cfg["input_image"]
+        args.output_dir = split_cfg["output_dir"]
+        args.frame_size = split_cfg["frame_size"]
+        args.overlap = split_cfg["overlap"]
+        args.prefix = split_cfg["prefix"]
+        args.format = split_cfg["format"]
+        args.save_metadata = split_cfg["save_metadata"]
+        args.visualize = split_cfg["visualize"]
+        logger.info("Komut belirtilmedi, varsayilan olarak 'split' islemi yapiliyor...")
+        logger.info(f"Varsayilan dosya: {args.input}")
+
     try:
         if args.command == 'split':
-            # Görüntüyü yükle
-            input_file = getattr(args, 'input', DEFAULT_INPUT_IMAGE)
-            img = processor.load_image(input_file)
-            
-            # Coğrafi bilgileri al (eğer mümkünse)
+            img = processor.load_image(args.input)
+
             try:
-                gt, px, py = processor.get_geotransform(input_file)
-            except:
-                logger.warning("Coğrafi bilgiler alınamadı, devam ediliyor...")
-            
-            # Böl
+                processor.get_geotransform(args.input)
+            except Exception:
+                logger.warning("Cografi bilgiler alinamadi, devam ediliyor...")
+
             img_cropped, filenames, metadata = processor.split_image(
                 img,
-                frame_size=getattr(args, 'frame_size', 512),
-                overlap=getattr(args, 'overlap', 32),
-                output_dir=getattr(args, 'output_dir', DEFAULT_OUTPUT_DIR),
-                prefix=getattr(args, 'prefix', 'goruntu'),
-                format=getattr(args, 'format', 'jpg'),
-                save_metadata=getattr(args, 'save_metadata', False),
-                original_path=input_file
+                frame_size=args.frame_size,
+                overlap=args.overlap,
+                output_dir=args.output_dir,
+                prefix=args.prefix,
+                format=args.format,
+                save_metadata=args.save_metadata,
+                original_path=args.input
             )
-            
-            # Metadata kaydet
-            if getattr(args, 'save_metadata', False):
+
+            if args.save_metadata:
                 import json
-                output_dir = getattr(args, 'output_dir', DEFAULT_OUTPUT_DIR)
-                metadata_path = os.path.join(output_dir, 'metadata.json')
-                with open(metadata_path, 'w') as f:
+                metadata_path = os.path.join(args.output_dir, 'metadata.json')
+                with open(metadata_path, 'w', encoding='utf-8') as f:
                     json.dump(metadata, f, indent=2, default=str)
                 logger.info(f"Metadata kaydedildi: {metadata_path}")
-            
-            # Görselleştir
-            if getattr(args, 'visualize', False):
-                num_frames_x = metadata['num_frames_x']
-                num_frames_y = metadata['num_frames_y']
-                fig = processor.visualize_crops(img_cropped, num_frames_x, num_frames_y)
+
+            if args.visualize:
+                processor.visualize_crops(
+                    img_cropped,
+                    metadata['num_frames_x'],
+                    metadata['num_frames_y']
+                )
                 plt.show()
-            
-            logger.info("Bölme işlemi tamamlandı!")
-        
+
+            logger.info("Bolme islemi tamamlandi!")
+
         elif args.command == 'merge':
-            # Birleştir
-            merged = processor.merge_images(
+            processor.merge_images(
                 input_dir=args.input_dir,
                 output_path=args.output,
                 num_frames_x=args.num_frames_x,
@@ -1407,83 +1463,76 @@ def main():
                 crop_overlap=args.crop_overlap,
                 frame_size=args.frame_size
             )
-            
-            logger.info("Birleştirme işlemi tamamlandı!")
-        
+            logger.info("Birlestirme islemi tamamlandi!")
+
         elif args.command == 'pipeline':
-            # Tam pipeline çalıştır
-            pipeline_processor = ImageProcessor(reference_dir=getattr(args, 'reference_dir', 'georeferans_sample'))
-            
-            # Referans raster'ı belirle
-            ref_raster = getattr(args, 'reference', None)
+            pipeline_processor = ImageProcessor(reference_dir=args.reference_dir)
+
+            ref_raster = args.reference
             if not ref_raster:
-                ref_raster = pipeline_processor.find_reference_raster(
-                    args.input, getattr(args, 'reference_dir', 'georeferans_sample')
-                )
-            
-            # Model dizini kontrolü
-            m_dir = getattr(args, 'model_dir', 'modeller')
-            m_path = getattr(args, 'model_path', None)
-            
+                ref_raster = pipeline_processor.find_reference_raster(args.input, args.reference_dir)
+
+            m_dir = args.model_dir
+            m_path = args.model_path
+
             results = pipeline_processor.run_full_pipeline(
                 input_image=args.input,
                 model_path=m_path,
                 model_dir=m_dir if os.path.exists(m_dir) else None,
-                split_frame_size=getattr(args, 'frame_size', 512),
-                split_overlap=getattr(args, 'overlap', 32),
+                split_frame_size=args.frame_size,
+                split_overlap=args.overlap,
+                split_output_dir=pipeline_cfg["split_output_dir"],
+                processed_output_dir=pipeline_cfg["processed_output_dir"],
+                merge_output_dir=pipeline_cfg["merge_output_dir"],
                 reference_raster=ref_raster,
-                crop_overlap=getattr(args, 'crop_overlap', 16),
-                image_size=(544, 544),
-                color_mode=getattr(args, 'color_mode', 'grayscale'),
-                batch_size=getattr(args, 'batch_size', 16)
+                georef_output_dir=pipeline_cfg["georef_output_dir"],
+                crop_overlap=args.crop_overlap,
+                image_size=pipeline_cfg["image_size"],
+                color_mode=args.color_mode,
+                batch_size=args.batch_size
             )
-            
-            # Sonuçları özetle
+
             logger.info("\n" + "=" * 60)
-            logger.info("İŞLEM ÖZETİ")
+            logger.info("ISLEM OZETI")
             logger.info("=" * 60)
             if results['split']:
-                logger.info(f"Bölme: {results['split']['num_pieces']} parça")
+                logger.info(f"Bolme: {results['split']['num_pieces']} parca")
             if results['inference']:
-                logger.info(f"Inference: {len(results['inference'])} model işlendi")
+                logger.info(f"Inference: {len(results['inference'])} model islendi")
             if results['merge']:
-                logger.info(f"Birleştirme: {len(results['merge'])} görüntü")
+                logger.info(f"Birlestirme: {len(results['merge'])} goruntu")
             if results['georef']:
                 logger.info(f"Jeoreferanslama: {len(results['georef'])} dosya")
             logger.info("=" * 60)
-            
-            logger.info("Pipeline tamamlandı!")
-        
+            logger.info("Pipeline tamamlandi!")
+
         elif args.command == 'georef':
-            # Jeoreferansla
-            # Eğer input belirtilmemişse, varsayılan dizindeki tüm dosyaları işle
             if args.input is None:
-                input_dir = DEFAULT_GEOREF_INPUT_DIR
+                input_dir = georef_cfg["input_dir"]
                 if not os.path.exists(input_dir):
-                    raise FileNotFoundError(f"Varsayılan dizin bulunamadı: {input_dir}")
-                
-                # Dizindeki tüm görüntü dosyalarını bul
-                image_files = [f for f in os.listdir(input_dir) 
-                              if any(f.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.tif', '.tiff'])]
-                
+                    raise FileNotFoundError(f"Varsayilan dizin bulunamadi: {input_dir}")
+
+                image_files = [
+                    f for f in os.listdir(input_dir)
+                    if any(f.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.tif', '.tiff'])
+                ]
+
                 if len(image_files) == 0:
-                    raise ValueError(f"Dizinde görüntü dosyası bulunamadı: {input_dir}")
-                
-                logger.info(f"{len(image_files)} dosya bulundu, işleniyor...")
-                
-                # Her dosyayı işle
+                    raise ValueError(f"Dizinde goruntu dosyasi bulunamadi: {input_dir}")
+
+                logger.info(f"{len(image_files)} dosya bulundu, isleniyor...")
+
                 for img_file in image_files:
                     input_path = os.path.join(input_dir, img_file)
-                    
-                    # Çıktı yolunu belirle
+
                     if args.output:
                         if os.path.isdir(args.output):
                             output_path = os.path.join(args.output, f"{img_file}_geo.tif")
                         else:
                             output_path = args.output
                     else:
-                        output_path = os.path.join(DEFAULT_GEOREF_OUTPUT_DIR, f"{img_file}_geo.tif")
-                    
+                        output_path = os.path.join(georef_cfg["output_dir"], f"{img_file}_geo.tif")
+
                     try:
                         processor.georeference_image(
                             input_path=input_path,
@@ -1493,21 +1542,19 @@ def main():
                             compress=args.compress,
                             nodata=args.nodata
                         )
-                        logger.info(f"✓ {img_file} işlendi")
+                        logger.info(f"OK {img_file} islendi")
                     except Exception as e:
-                        logger.error(f"✗ {img_file} işlenirken hata: {e}")
+                        logger.error(f"HATA {img_file} islenirken hata: {e}")
                         continue
-                
-                logger.info(f"Toplam {len(image_files)} dosya işlendi!")
+
+                logger.info(f"Toplam {len(image_files)} dosya islendi!")
             else:
-                # Tek dosya işle
                 if args.output is None:
-                    # Çıktı yolunu otomatik oluştur
                     base_name = os.path.splitext(os.path.basename(args.input))[0]
-                    output_path = os.path.join(DEFAULT_GEOREF_OUTPUT_DIR, f"{base_name}_geo.tif")
+                    output_path = os.path.join(georef_cfg["output_dir"], f"{base_name}_geo.tif")
                 else:
                     output_path = args.output
-                
+
                 processor.georeference_image(
                     input_path=args.input,
                     reference_path=args.reference,
@@ -1516,83 +1563,74 @@ def main():
                     compress=args.compress,
                     nodata=args.nodata
                 )
-            
-            logger.info("Jeoreferanslama işlemi tamamlandı!")
-    
+
+            logger.info("Jeoreferanslama islemi tamamlandi!")
+
     except Exception as e:
-        logger.error(f"Hata oluştu: {e}", exc_info=True)
+        logger.error(f"Hata olustu: {e}", exc_info=True)
         sys.exit(1)
 
 
 if __name__ == "__main__":
-    # Varsayılan değerler
-    DEFAULT_INPUT_IMAGE = "urgup_bingmap_30cm_utm.tif"
-    #DEFAULT_INPUT_IMAGE = "karlik_30_cm_bingmap_utm.tif"
-    DEFAULT_MODEL_DIR = "modeller"
-    DEFAULT_REFERENCE_DIR = "georeferans_sample"  # Referans dosyalarının bulunduğu klasör
-    DEFAULT_REFERENCE_RASTER = None  # None ise otomatik bulunur
-    DEFAULT_COLOR_MODE = "grayscale"  # "grayscale" veya "rgb"
-    DEFAULT_BATCH_SIZE = 16  # GPU VRAM'a göre ayarlayın
-    
-    # Eğer hiç argüman verilmemişse, varsayılan değerlerle tam pipeline çalıştır
+    split_cfg = CONFIG["split"]
+    pipeline_cfg = CONFIG["pipeline"]
+
     if len(sys.argv) == 1:
         logger.info("=" * 60)
-        logger.info("PARAMETRE VERİLMEDİ, VARSAYILAN DEĞERLERLE TAM PİPELİNE ÇALIŞTIRILIYOR")
+        logger.info("PARAMETRE VERILMEDI, VARSAYILAN DEGERLERLE TAM PIPELINE CALISTIRILIYOR")
         logger.info("=" * 60)
-        
-        processor = ImageProcessor(reference_dir=DEFAULT_REFERENCE_DIR)
-        
-        # Georeferans_sample klasörünü oluştur (eğer yoksa)
-        if not os.path.exists(DEFAULT_REFERENCE_DIR):
-            logger.info(f"'{DEFAULT_REFERENCE_DIR}' klasörü oluşturuluyor...")
-            os.makedirs(DEFAULT_REFERENCE_DIR, exist_ok=True)
-            logger.info(f"✓ '{DEFAULT_REFERENCE_DIR}' klasörü oluşturuldu.")
-            logger.info(f"  Lütfen referans raster dosyalarını bu klasöre koyun.")
-            logger.info(f"  Örnek: ana_harita_urgup_30_cm__Georefference_utm.tif")
-            logger.info(f"         ana_harita_karlik_30_cm_bingmap_Georeferans.tif")
-        
+
+        processor = ImageProcessor(reference_dir=pipeline_cfg["reference_dir"])
+
+        if not os.path.exists(pipeline_cfg["reference_dir"]):
+            logger.info(f"'{pipeline_cfg['reference_dir']}' klasoru olusturuluyor...")
+            os.makedirs(pipeline_cfg["reference_dir"], exist_ok=True)
+            logger.info(f"OK '{pipeline_cfg['reference_dir']}' klasoru olusturuldu.")
+            logger.info("  Lutfen referans raster dosyalarini bu klasore koyun.")
+            logger.info("  Ornek: ana_harita_urgup_30_cm__Georefference_utm.tif")
+            logger.info("         ana_harita_karlik_30_cm_bingmap_Georeferans.tif")
+
         try:
-            # Referans raster'ı belirle
             reference_raster = None
-            if DEFAULT_REFERENCE_RASTER and os.path.exists(DEFAULT_REFERENCE_RASTER):
-                reference_raster = DEFAULT_REFERENCE_RASTER
+            configured_reference = pipeline_cfg["reference_raster"]
+            if configured_reference and os.path.exists(configured_reference):
+                reference_raster = configured_reference
             else:
-                # Otomatik bul (georeferans_sample klasöründen)
-                reference_raster = processor.find_reference_raster(DEFAULT_INPUT_IMAGE, DEFAULT_REFERENCE_DIR)
-            
-            # Tam pipeline'ı çalıştır
+                reference_raster = processor.find_reference_raster(
+                    split_cfg["input_image"],
+                    pipeline_cfg["reference_dir"]
+                )
+
             results = processor.run_full_pipeline(
-                input_image=DEFAULT_INPUT_IMAGE,
-                model_dir=DEFAULT_MODEL_DIR if os.path.exists(DEFAULT_MODEL_DIR) else None,
-                split_frame_size=512,
-                split_overlap=32,
-                split_output_dir="bolunmus/bolunmus",
-                processed_output_dir="parcalar",
-                merge_output_dir="ana_haritalar",
+                input_image=split_cfg["input_image"],
+                model_path=pipeline_cfg["model_path"],
+                model_dir=pipeline_cfg["model_dir"] if os.path.exists(pipeline_cfg["model_dir"]) else None,
+                split_frame_size=pipeline_cfg["split_frame_size"],
+                split_overlap=pipeline_cfg["split_overlap"],
+                split_output_dir=pipeline_cfg["split_output_dir"],
+                processed_output_dir=pipeline_cfg["processed_output_dir"],
+                merge_output_dir=pipeline_cfg["merge_output_dir"],
                 reference_raster=reference_raster,
-                georef_output_dir="georefli/harita",
-                crop_overlap=16,
-                image_size=(544, 544),
-                color_mode=DEFAULT_COLOR_MODE,
-                batch_size=DEFAULT_BATCH_SIZE
+                georef_output_dir=pipeline_cfg["georef_output_dir"],
+                crop_overlap=pipeline_cfg["crop_overlap"],
+                image_size=pipeline_cfg["image_size"],
+                color_mode=pipeline_cfg["color_mode"],
+                batch_size=pipeline_cfg["batch_size"]
             )
-            
-            # Sonuçları özetle
+
             logger.info("\n" + "=" * 60)
-            logger.info("İŞLEM ÖZETİ")
+            logger.info("ISLEM OZETI")
             logger.info("=" * 60)
-            logger.info(f"Bölme: {results['split']['num_pieces']} parça oluşturuldu")
+            logger.info(f"Bolme: {results['split']['num_pieces']} parca olusturuldu")
             if results['inference']:
-                logger.info(f"Inference: {len(results['inference'])} model işlendi")
-            logger.info(f"Birleştirme: {len(results['merge'])} görüntü birleştirildi")
+                logger.info(f"Inference: {len(results['inference'])} model islendi")
+            logger.info(f"Birlestirme: {len(results['merge'])} goruntu birlestirildi")
             if results['georef']:
-                logger.info(f"Jeoreferanslama: {len(results['georef'])} görüntü jeoreferanslandı")
+                logger.info(f"Jeoreferanslama: {len(results['georef'])} goruntu jeoreferanslandi")
             logger.info("=" * 60)
-            
+
         except Exception as e:
-            logger.error(f"Hata oluştu: {e}", exc_info=True)
+            logger.error(f"Hata olustu: {e}", exc_info=True)
             sys.exit(1)
     else:
-        # Normal argparse ile çalıştır
         main()
-
