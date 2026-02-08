@@ -982,11 +982,15 @@ class ImageProcessor:
         """
         Görüntüyü referans raster'ın coğrafi bilgileriyle jeoreferanslar.
         
+        Giriş görüntüsünün kanal sayısını otomatik algılar:
+        - 1 kanal (grayscale) → 1-band GeoTIFF
+        - 3 kanal (RGB) → 3-band GeoTIFF
+        
         Args:
             input_path: Jeoreferanslanacak görüntü yolu
             reference_path: Referans GeoTIFF dosyası yolu
             output_path: Çıktı dosyası yolu
-            band: Okunacak band numarası (1-indexed)
+            band: Okunacak band numarası (1-indexed, sadece tek band için)
             compress: Sıkıştırma tipi ('LZW', 'DEFLATE', 'JPEG', 'NONE')
             nodata: NoData değeri
             
@@ -1014,11 +1018,30 @@ class ImageProcessor:
         except Exception as e:
             raise ValueError(f"Referans raster açılamadı: {e}")
         
-        # Giriş görüntüsünü oku
+        # Giriş görüntüsünün kanal sayısını algıla
+        input_band_count = input_raster.count
+        logger.info(f"Giriş görüntüsü kanal sayısı: {input_band_count}")
+        
+        # Tüm bandları oku
         try:
-            data = input_raster.read(band)
+            if input_band_count == 1:
+                # Grayscale: tek band
+                data = input_raster.read(1)
+                data = np.expand_dims(data, axis=0)  # (H, W) -> (1, H, W)
+            elif input_band_count >= 3:
+                # RGB veya RGBA: ilk 3 bandı al
+                data = input_raster.read([1, 2, 3])  # (3, H, W)
+                if input_band_count > 3:
+                    logger.info(f"  Alpha kanalı atlandı (toplam {input_band_count} band)")
+            else:
+                # 2 kanallı nadir durum
+                data = input_raster.read()
+                logger.warning(f"  Beklenmeyen kanal sayısı: {input_band_count}")
         except Exception as e:
-            raise ValueError(f"Band {band} okunamadı: {e}")
+            raise ValueError(f"Bandlar okunamadı: {e}")
+        
+        # Çıktı kanal sayısını belirle
+        output_band_count = 3 if input_band_count >= 3 else 1
         
         # Meta verileri referans raster'dan kopyala
         out_meta = reference_raster.meta.copy()
@@ -1026,7 +1049,7 @@ class ImageProcessor:
             'driver': 'GTiff',
             'width': reference_raster.shape[1],
             'height': reference_raster.shape[0],
-            'count': 1,
+            'count': output_band_count,
             'dtype': 'uint8',
             'crs': reference_raster.crs,
             'transform': reference_raster.transform,
@@ -1041,21 +1064,28 @@ class ImageProcessor:
         if output_dir:
             self.create_output_directory(output_dir)
         
-        # Veriyi uint8'e dönüştür
+        # Veriyi uint8'e dönüştür (her band için ayrı ayrı)
         if data.dtype != np.uint8:
-            # Normalize et ve uint8'e dönüştür
-            data_min = data.min()
-            data_max = data.max()
-            if data_max > data_min:
-                data = ((data - data_min) / (data_max - data_min) * 255).astype(np.uint8)
-            else:
-                data = data.astype(np.uint8)
+            data_out = np.zeros_like(data, dtype=np.uint8)
+            for i in range(data.shape[0]):
+                band_data = data[i]
+                data_min = band_data.min()
+                data_max = band_data.max()
+                if data_max > data_min:
+                    data_out[i] = ((band_data - data_min) / (data_max - data_min) * 255).astype(np.uint8)
+                else:
+                    data_out[i] = band_data.astype(np.uint8)
+            data = data_out
         
         # Yeni raster dosyasını yaz
         with rasterio.open(output_path, 'w', **out_meta) as dst:
-            dst.write_band(1, data)
+            if output_band_count == 1:
+                dst.write_band(1, data[0])
+            else:
+                for i in range(output_band_count):
+                    dst.write_band(i + 1, data[i])
         
-        logger.info(f"Jeoreferanslı görüntü kaydedildi: {output_path}")
+        logger.info(f"Jeoreferanslı görüntü kaydedildi: {output_path} ({output_band_count} band)")
         
         # İkinci aşama: GDAL Translate ile optimize et
         if compress == 'JPEG' or compress == 'jpeg':
