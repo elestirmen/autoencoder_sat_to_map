@@ -43,20 +43,17 @@ CONFIG = {
     "merge": {
         "input_dir": "parcalar",
         "output": "birlestirilmis.jpg",
-        "crop_overlap": 0,
+        "crop_overlap": 16,
         "frame_size": None,
         "sort_files": True,
     },
     "pipeline": {
         "model_dir": "modeller",
         "model_path": None,
-        "split_frame_size": 512,
-        "split_overlap": 32,
         "split_output_dir": "bolunmus/bolunmus",
         "processed_output_dir": "parcalar",
         "merge_output_dir": "ana_haritalar",
         "georef_output_dir": "georefli/harita",
-        "crop_overlap": 16,
         "image_size": (544, 544),
         "color_mode": "grayscale",
         "batch_size": 16,
@@ -134,7 +131,6 @@ try:
     import tensorflow as tf
     from tensorflow.keras.models import load_model
     from tensorflow.keras.preprocessing.image import img_to_array, load_img
-    from matplotlib import pyplot, cm
     TENSORFLOW_AVAILABLE = True
 except ImportError:
     TENSORFLOW_AVAILABLE = False
@@ -438,7 +434,7 @@ class ImageProcessor:
             output_path: Birleştirilmiş görüntünün kaydedileceği yol
             num_frames_x: X eksenindeki parça sayısı (None ise otomatik hesaplanır)
             num_frames_y: Y eksenindeki parça sayısı (None ise otomatik hesaplanır)
-            crop_overlap: Örtüşme miktarını kesmek için piksel sayısı
+            crop_overlap: Parçalar arası örtüşme genişliği (birleştirmede kullanılacak)
             frame_size: Her parçanın boyutu (None ise otomatik algılanır)
             sort_files: Dosyaları sırala mı (natsort kullanarak)
             
@@ -525,7 +521,7 @@ class ImageProcessor:
                 logger.warning(f"Görüntü yüklenemedi, atlanıyor: {img_path}")
                 continue
             
-            # Örtüşmeyi kes
+            # Örtüşme kenarlarını kırp (her kenardan crop_overlap piksel)
             if crop_overlap > 0:
                 h, w = img.shape[:2]
                 img = img[crop_overlap:h-crop_overlap, crop_overlap:w-crop_overlap]
@@ -539,7 +535,7 @@ class ImageProcessor:
             logger.warning(f"Yüklenen görüntü sayısı ({len(img_array)}) "
                          f"beklenen sayıdan ({num_frames_x * num_frames_y}) farklı!")
         
-        # Görüntüleri birleştir
+        # Görüntüleri birleştir: basit hstack (yatay) + vstack (dikey)
         rows = []
         idx = 0
         
@@ -852,19 +848,34 @@ class ImageProcessor:
                 filename = batch_files[file_idx]
                 try:
                     base_name = os.path.splitext(filename)[0]
-                    output_filename = os.path.join(output_dir, f'goruntu_{base_name}.jpg')
-                    
-                    pred = predictions[pred_idx]
-                    
-                    if color_mode == "grayscale" or pred.shape[-1] == 1:
-                        goruntu = pred.reshape(image_size[0], image_size[1])
-                        pyplot.imsave(output_filename, goruntu, cmap=cm.gray)
+                    # Ara ciktilarda kayipli sikistirma kaynakli artefakti azaltmak icin PNG kullan.
+                    output_filename = os.path.join(output_dir, f'goruntu_{base_name}.png')
+
+                    pred = predictions[pred_idx].astype(np.float32)
+                    if pred.ndim == 3 and pred.shape[-1] == 1:
+                        pred = pred[:, :, 0]
+
+                    pmin = float(np.min(pred))
+                    pmax = float(np.max(pred))
+
+                    # Parca bazli dinamik normalize etme dikis artefaktlarini artirir.
+                    # Bu nedenle global sabit olcek kullanilir.
+                    if -1.1 <= pmin and pmax <= 1.1:
+                        pred_uint8 = np.clip((pred + 1.0) * 127.5, 0, 255).astype(np.uint8)
+                    elif -0.1 <= pmin and pmax <= 1.1:
+                        pred_uint8 = np.clip(pred * 255.0, 0, 255).astype(np.uint8)
                     else:
-                        goruntu = pred.copy()
-                        if goruntu.max() <= 1.0:
-                            goruntu = (goruntu * 255).astype(np.uint8)
-                        cv2.imwrite(output_filename, cv2.cvtColor(goruntu, cv2.COLOR_RGB2BGR))
-                    
+                        pred_uint8 = np.clip(pred, 0, 255).astype(np.uint8)
+
+                    if color_mode == "grayscale" or pred_uint8.ndim == 2:
+                        if pred_uint8.ndim == 3:
+                            pred_uint8 = pred_uint8[:, :, 0]
+                        cv2.imwrite(output_filename, pred_uint8)
+                    else:
+                        if pred_uint8.ndim == 2:
+                            pred_uint8 = cv2.cvtColor(pred_uint8, cv2.COLOR_GRAY2RGB)
+                        cv2.imwrite(output_filename, cv2.cvtColor(pred_uint8, cv2.COLOR_RGB2BGR))
+
                     output_files.append(output_filename)
                 except Exception as e:
                     logger.error(f"Görüntü kaydedilemedi ({filename}): {e}")
@@ -882,14 +893,14 @@ class ImageProcessor:
         input_image: str,
         model_path: Optional[str] = CONFIG["pipeline"]["model_path"],
         model_dir: Optional[str] = CONFIG["pipeline"]["model_dir"],
-        split_frame_size: int = CONFIG["pipeline"]["split_frame_size"],
-        split_overlap: int = CONFIG["pipeline"]["split_overlap"],
+        split_frame_size: int = CONFIG["split"]["frame_size"],
+        split_overlap: int = CONFIG["split"]["overlap"],
         split_output_dir: str = CONFIG["pipeline"]["split_output_dir"],
         processed_output_dir: str = CONFIG["pipeline"]["processed_output_dir"],
         merge_output_dir: str = CONFIG["pipeline"]["merge_output_dir"],
         reference_raster: Optional[str] = CONFIG["pipeline"]["reference_raster"],
         georef_output_dir: str = CONFIG["pipeline"]["georef_output_dir"],
-        crop_overlap: int = CONFIG["pipeline"]["crop_overlap"],
+        crop_overlap: int = CONFIG["merge"]["crop_overlap"],
         image_size: Tuple[int, int] = CONFIG["pipeline"]["image_size"],
         color_mode: str = CONFIG["pipeline"]["color_mode"],
         batch_size: int = CONFIG["pipeline"]["batch_size"]
@@ -1352,7 +1363,7 @@ Ornekler:
     )
     merge_parser.add_argument('--num_frames_x', type=int, help='X eksenindeki parca sayisi')
     merge_parser.add_argument('--num_frames_y', type=int, help='Y eksenindeki parca sayisi')
-    merge_parser.add_argument('--crop_overlap', type=int, default=merge_cfg["crop_overlap"], help='Ortusmeyi kesme miktari')
+    merge_parser.add_argument('--crop_overlap', type=int, default=merge_cfg["crop_overlap"], help='Birlestirmede kullanilacak ortusme genisligi')
     merge_parser.add_argument('--frame_size', type=int, default=merge_cfg["frame_size"], help='Parca boyutu (otomatik algilanir)')
 
     # Pipeline command
@@ -1369,9 +1380,9 @@ Ornekler:
         help=f'Model dosyalarinin bulundugu dizin (varsayilan: {pipeline_cfg["model_dir"]})'
     )
     pipeline_parser.add_argument('--model_path', default=pipeline_cfg["model_path"], help='Tek model dosyasi yolu (model_dir yerine)')
-    pipeline_parser.add_argument('--frame_size', type=int, default=pipeline_cfg["split_frame_size"], help='Parca boyutu (piksel)')
-    pipeline_parser.add_argument('--overlap', type=int, default=pipeline_cfg["split_overlap"], help='Bolme ortusme miktari (piksel)')
-    pipeline_parser.add_argument('--crop_overlap', type=int, default=pipeline_cfg["crop_overlap"], help='Birlestirmede kesilecek ortusme (piksel)')
+    pipeline_parser.add_argument('--frame_size', type=int, default=split_cfg["frame_size"], help='Parca boyutu (piksel)')
+    pipeline_parser.add_argument('--overlap', type=int, default=split_cfg["overlap"], help='Bolme ortusme miktari (piksel)')
+    pipeline_parser.add_argument('--crop_overlap', type=int, default=merge_cfg["crop_overlap"], help='Birlestirmede kullanilacak ortusme genisligi')
     pipeline_parser.add_argument('--color_mode', default=pipeline_cfg["color_mode"], choices=['grayscale', 'rgb'], help='Renk modu')
     pipeline_parser.add_argument('--batch_size', type=int, default=pipeline_cfg["batch_size"], help='Batch boyutu')
     pipeline_parser.add_argument('--reference', default=pipeline_cfg["reference_raster"], help='Referans raster dosyasi')
@@ -1573,6 +1584,7 @@ Ornekler:
 
 if __name__ == "__main__":
     split_cfg = CONFIG["split"]
+    merge_cfg = CONFIG["merge"]
     pipeline_cfg = CONFIG["pipeline"]
 
     if len(sys.argv) == 1:
@@ -1605,14 +1617,14 @@ if __name__ == "__main__":
                 input_image=split_cfg["input_image"],
                 model_path=pipeline_cfg["model_path"],
                 model_dir=pipeline_cfg["model_dir"] if os.path.exists(pipeline_cfg["model_dir"]) else None,
-                split_frame_size=pipeline_cfg["split_frame_size"],
-                split_overlap=pipeline_cfg["split_overlap"],
+                split_frame_size=split_cfg["frame_size"],
+                split_overlap=split_cfg["overlap"],
                 split_output_dir=pipeline_cfg["split_output_dir"],
                 processed_output_dir=pipeline_cfg["processed_output_dir"],
                 merge_output_dir=pipeline_cfg["merge_output_dir"],
                 reference_raster=reference_raster,
                 georef_output_dir=pipeline_cfg["georef_output_dir"],
-                crop_overlap=pipeline_cfg["crop_overlap"],
+                crop_overlap=merge_cfg["crop_overlap"],
                 image_size=pipeline_cfg["image_size"],
                 color_mode=pipeline_cfg["color_mode"],
                 batch_size=pipeline_cfg["batch_size"]
