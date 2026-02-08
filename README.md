@@ -10,8 +10,18 @@ Bu proje, büyük ortofoto ve uydu görüntülerini karolara bölerek, eğitilmi
 
 ## 📋 İçindekiler
 
+- [Projenin Amacı](#-projenin-amacı)
 - [Özellikler](#-özellikler)
 - [Mimari](#-mimari)
+- [4 Aşamalı İş Hattı (Detaylı)](#-4-aşamalı-iş-hattı-detaylı)
+  - [Aşama 1: Karo Bölme](#aşama-1-karo-bölme-tiling)
+  - [Aşama 2: Eğitim](#aşama-2-eğitim-training)
+  - [Aşama 3: Çıkarım + Birleştirme](#aşama-3-çıkarım--birleştirme-inference--merge)
+  - [Aşama 4: Jeoreferanslama](#aşama-4-jeoreferanslama-georeferencing)
+- [Model Mimarileri](#-model-mimarileri)
+- [Kanal Stratejileri](#-kanal-stratejileri)
+- [Veri Akışı (Dosya/Klasör Bazında)](#-veri-akışı-dosyaklasör-bazında)
+- [Dosyaların Evrimsel İlişkisi](#-dosyaların-evrimsel-ilişkisi)
 - [Dizin Yapısı](#-dizin-yapısı)
 - [Akış Şeması](#-akış-şeması-e2e)
 - [Kurulum](#-kurulum-ve-bağımlılıklar)
@@ -24,6 +34,28 @@ Bu proje, büyük ortofoto ve uydu görüntülerini karolara bölerek, eğitilmi
 - [Performans](#-performans-ipuçları)
 - [Sorun Giderme](#-sorun-giderme-faq)
 - [Hızlı Başlangıç](#-hızlı-başlangıç)
+
+---
+
+## 🎯 Projenin Amacı
+
+Bu proje, bir **tez** kapsamında geliştirilen uçtan uca bir **uydu görüntüsünden otomatik harita üretim sistemidir**. Temel amaç:
+
+> **Uydu/ortofoto görüntülerini (Bing Maps, Google Maps vb.) girdi olarak alıp, eğitilmiş bir autoencoder sinir ağı ile bu görüntülerden harita stili (kartografik) çıktı üretmek ve sonucu coğrafi koordinatlarla (GeoTIFF) kaydetmek.**
+
+Proje Kapadokya bölgesi (Ürgüp, Karlık) üzerinde çalışılmakta olup, 30 cm/piksel çözünürlüklü uydu görüntüleri kullanılmaktadır. Büyük uydu görüntüsü doğrudan sinir ağına verilemeyeceğinden, görüntü önce küçük karolara bölünür, her karo model ile işlenir, ardından parçalar birleştirilip coğrafi koordinatlarla kaydedilir.
+
+### Kullanılan Teknolojiler
+
+| Kategori | Teknoloji | Kullanım Amacı |
+|---|---|---|
+| **Derin Öğrenme** | TensorFlow / Keras | Autoencoder modeli eğitimi ve çıkarımı |
+| **Veri Pipeline** | tf.data | Görüntülerin diskten akışkan şekilde okunması ve ön-işlenmesi |
+| **Görüntü İşleme** | OpenCV (cv2) | Görüntü bölme, birleştirme, histogram eşitleme, format dönüşümü |
+| **Coğrafi Veri** | GDAL / Rasterio | GeoTIFF okuma/yazma, CRS/transform kopyalama, jeoreferanslama |
+| **Sayısal Hesaplama** | NumPy | Görüntü array manipülasyonu, hstack/vstack birleştirme |
+| **Görselleştirme** | Matplotlib | Parça görselleştirme, gri tonlamalı kaydetme |
+| **Yardımcı** | natsort, tqdm, argparse | Doğal sıralama, ilerleme çubuğu, CLI arayüzü |
 
 ---
 
@@ -43,12 +75,252 @@ Bu proje, büyük ortofoto ve uydu görüntülerini karolara bölerek, eğitilmi
 
 ## 🏗️ Mimari
 
-Proje, aşağıdaki ana bileşenlerden oluşur:
+Proje, birbiriyle sıralı çalışan 4 ana bileşenden oluşur:
 
-1. **Veri Hazırlama**: Büyük TIF görüntülerini karolara bölme
-2. **Eğitim Pipeline**: tf.data ile veri yükleme ve otoenkoder eğitimi
-3. **Çıkarım Pipeline**: Toplu karo tahmini ve mozaik birleştirme
-4. **Jeoreferans**: GeoTIFF formatında koordinatlandırma
+1. **Karo Bölme (Tiling)**: Büyük TIF görüntülerini 512×512 veya 544×544 piksellik küçük karolara bölme
+2. **Eğitim (Training)**: tf.data ile yan yana ikili görüntülerden veri yükleme ve autoencoder eğitimi
+3. **Çıkarım + Birleştirme (Inference + Merge)**: Eğitilmiş model(ler) ile toplu karo tahmini, bindirme kırpma ve mozaik birleştirme
+4. **Jeoreferanslama (Georeferencing)**: Referans raster'dan CRS/transform kopyalayarak GeoTIFF formatında koordinatlandırma
+
+---
+
+## 🔬 4 Aşamalı İş Hattı (Detaylı)
+
+### Aşama 1: Karo Bölme (Tiling)
+
+**İlgili dosyalar:** `goruntu bolme_beta.py`, `goruntu bolme.py`, `goruntu_islemleri.py` (split komutu)
+
+**Ne yapar:** Büyük uydu görüntüleri (GeoTIFF, genellikle onbinlerce piksel boyutunda) doğrudan sinir ağına verilemez. Bu yüzden görüntü 512×512 veya 544×544 piksellik küçük karolara bölünür.
+
+**Nasıl çalışır:**
+
+1. Giriş olarak büyük bir `.tif` dosyası alınır (örn: `urgup_bingmap_30cm_utm.tif` — Ürgüp'ün 30 cm/piksel çözünürlüklü Bing Maps uydu görüntüsü)
+2. GDAL ile coğrafi koordinat bilgileri (GeoTransform) okunur
+3. Görüntü, `frame_size` piksellik karelere bölünür
+4. Her parçaya 32 piksellik **örtüşme (overlap)** eklenir — bu, birleştirme sonrası dikiş izlerini azaltmak içindir
+5. Parçalar `bolunmus/bolunmus/` klasörüne `goruntu_0_0.jpg`, `goruntu_0_1.jpg`, ... formatında kaydedilir
+
+**Somut örnek:** Ürgüp haritası 44×60 = 2.640 parçaya, Karlık haritası farklı boyutuna göre farklı sayıda parçaya bölünür.
+
+**Örtüşme mantığı:** Her parçanın kenarlarına 32 piksel eklenerek komşu parçalarla örtüşme sağlanır. Birleştirme aşamasında bu kenarlardan 16 piksel kırpılır. Böylece parçalar arasında keskin dikiş izleri oluşması engellenir.
+
+---
+
+### Aşama 2: Eğitim (Training)
+
+**İlgili dosyalar:**
+- `autoencoder_dinamik_bellek_dosyadan_okuma_tf.data_renkli.py` — Renkli (3 kanal → 3 kanal)
+- `autoencoder_dinamik_bellek_dosyadan_okuma_tf.data_3_kanal_to_1_kanal.py` — Gri tonlamalı (1→1 veya 3→1)
+
+**Ne yapar:** Uydu görüntüsünden harita stili öğrenen autoencoder modelini eğitir.
+
+**Eğitim verisinin formatı:** Eğitim görüntüleri **yan yana ikili** formattadır: her bir görüntü dosyasının **sol yarısı** uydu/ortofoto, **sağ yarısı** karşılık gelen hedef harita stilidir. Script bu görüntüyü runtime'da genişliğin ortasından ikiye böler:
+
+```python
+width = shape[1] // 2  # Girdi ve etiket yan yana olduğu için genişliği yarıya böl
+input_img = tf.slice(img, [0, 0, 0], [height, width, kanal])
+label_img = tf.slice(img, [0, width, 0], [height, width, kanal])
+```
+
+**Veri pipeline (tf.data):**
+1. Görüntü yolları `tf.data.Dataset.from_tensor_slices` ile yüklenir
+2. `map` ile paralel ön-işleme: dosya okuma → decode → ikiye bölme → 544×544'e resize → `[-1, 1]` normalizasyon
+3. `batch` ve `prefetch` ile GPU'ya akışkan besleme
+4. Gri tonlamalı varyantta ek olarak `tfa.image.equalize` ile histogram eşitleme uygulanır
+
+**Devam eğitimi:** Her iki script de önce modeli oluşturur, ardından `model = load_model("son_model.h5")` ile önceki eğitimin ağırlıklarını yükler. Böylece eğitime kaldığı yerden devam edilir. Sıfırdan eğitim için bu satır yoruma alınmalıdır.
+
+**Checkpoint:** Her epoch sonunda model otomatik kaydedilir: `_<tarih>_model_f<filtre>_k<kernel>_epoch_<epoch>_<activation>_<strides>_.h5`
+
+**Eğitim parametreleri karşılaştırması:**
+
+| Parametre | Renkli (3→3) | Gri (1→1) |
+|---|---|---|
+| Input shape | (544, 544, 3) | (544, 544, 1) |
+| Output channels | 3 | 1 |
+| Batch size | 16 | 8 |
+| Learning rate | 0.0005 | 0.001 |
+| Epochs | 21 | 20 |
+| Train/Val split | %80 / %20 | %90 / %10 |
+| Histogram eşitleme | Yok | Var (`tfa.image.equalize`) |
+| Loss | MSE | MSE |
+| Optimizer | Adam | Adam |
+| Aktif model | `create_gpt_autoencoder_none_regularization` | `create_advanced_autoencoder` |
+
+---
+
+### Aşama 3: Çıkarım + Birleştirme (Inference + Merge)
+
+**İlgili dosyalar:**
+- `harita_uretici_beta_gpt_hizli.py` — Gri tonlamalı (1 kanal çıktı)
+- `harita_uretici_beta_gpt_hizli_renkli.py` — Renkli (3 kanal çıktı)
+- `harita_uretici_beta_gpt_hizli_3_kanal_to_1_kanal.py` — RGB giriş, 1 kanal çıktı
+- `goruntu_islemleri.py` (inference + merge)
+
+**Ne yapar:** Aşama 1'de bölünen uydu karolarını eğitilmiş model(ler)den geçirip harita tahmini üretir, ardından tüm parçaları birleştirerek tek bir büyük harita mozaiği oluşturur.
+
+**Çıkarım süreci (her parça için):**
+
+1. Karo, 544×544'e yeniden boyutlandırılır
+2. Gri tonlamalı varyantta `cv2.equalizeHist` ile histogram eşitleme uygulanır
+3. `[-1, 1]` aralığına normalleştirilir
+4. `model.predict()` ile tahmin yapılır
+5. Sonuç dosyaya kaydedilir (grayscale: `pyplot.imsave` ile; renkli: `cv2.imwrite` ile)
+
+**Paralellik:** `ThreadPoolExecutor` ile parçalar paralel olarak işlenir.
+
+**Çoklu model desteği:** `modeller/` klasöründeki tüm `.h5` dosyaları başta yüklenir ve aynı parça seti üzerinde ayrı ayrı çıkarım yapılır. Bu sayede farklı modellerin sonuçları karşılaştırılabilir.
+
+**Birleştirme süreci (Mozaikleme):**
+
+1. Tüm parçalar `natsorted` ile doğal sıralama ile listelenir
+2. Her parçanın dış kenarlarından **16 piksel** kırpılır (örtüşme bölgesi) — dikiş izlerini azaltır
+3. Parçalar satır satır `np.hstack` ile yatay, satırlar `np.vstack` ile dikey birleştirilir
+4. Sonuç `ana_haritalar/` klasörüne kaydedilir
+
+**Grid boyutları:** Ürgüp haritası için `44×60`, Karlık için `60×35` gibi sabitler tanımlanmış. Eğer toplam parça sayısı tam kare ise karekök alınarak otomatik hesaplanır, değilse elle ayarlanması gerekir.
+
+---
+
+### Aşama 4: Jeoreferanslama (Georeferencing)
+
+**İlgili dosyalar:** `georef.py`, `georef_gpt.py`, `goruntu_islemleri.py` (georef komutu)
+
+**Ne yapar:** Birleştirilmiş harita çıktıları (JPG) henüz coğrafi koordinat bilgisi taşımaz. Bu adım, çıktıları bir referans GeoTIFF dosyasından CRS (Coordinate Reference System) ve transform bilgilerini kopyalayarak koordinatlandırır.
+
+**Nasıl çalışır:**
+
+1. `ana_haritalar/` klasöründeki tüm birleştirilmiş JPG'ler sırayla okunur
+2. Referans raster açılır (örn: `ana_harita_urgup_30_cm__Georefference_utm.tif`)
+3. Referanstan CRS, transform, boyut bilgileri kopyalanır
+4. Üretilen harita verisi bu meta verilerle birlikte LZW sıkıştırmalı GeoTIFF olarak yazılır
+5. İkinci geçişte GDAL Translate ile JPEG sıkıştırmalı optimize edilmiş versiyon oluşturulur
+
+**Referans raster nedir?** Daha önceden coğrafi olarak hizalanmış (koordinatlandırılmış) bir TIF dosyasıdır. Aynı bölgenin, aynı boyutlardaki bu dosyasının coğrafi bilgileri (hangi koordinatlar, hangi projeksiyon, piksel başına kaç metre) üretilen haritaya kopyalanır. Böylece üretilen harita GIS yazılımlarında (QGIS, ArcGIS vb.) doğru konumda görüntülenir.
+
+**`goruntu_islemleri.py` ek iyileştirmeleri:**
+- Görüntü dosya adındaki anahtar kelimeler (urgup, karlik vb.) ile `georeferans_sample/` klasöründeki referanslar arasında puanlama yaparak en uygun eşleşmeyi otomatik bulur
+- Manuel referans belirtmeye gerek kalmaz
+
+---
+
+## 🧠 Model Mimarileri
+
+Projede birden fazla model denemesi yapılmıştır. Tümü autoencoder (encoder-decoder) mimarisindedir:
+
+| Model Fonksiyonu | Encoder | Decoder | Durum |
+|---|---|---|---|
+| `create_deneysel_model` | Conv2D (stride 2 ile downsampling) | Conv2DTranspose | Deneysel |
+| `create_autoencoder_model_classic` | Conv2D + Dropout (stride 1, boyut değişmez) | Conv2DTranspose + Dropout | Deneysel |
+| `create_autoencoder_model` | Conv2D (stride 2, 3× downsampling) | Conv2DTranspose (stride 2, 3× upsampling) | Eski |
+| `create_upsampled_autoencoder` | Conv2D (stride 1) | UpSampling2D + Conv2D | Eski |
+| `create_advanced_autoencoder` | Conv2D + MaxPooling2D + Dropout | Conv2DTranspose + UpSampling2D + Dropout | **Gri modelde aktif** |
+| `create_gpt_autoencoder` | Conv2D + MaxPool + Dropout + L1 reg. | Conv2DTranspose + UpSampling2D + Dropout | Favori (yedek) |
+| `create_gpt_autoencoder_none_regularization` | Conv2D + MaxPooling2D + Dropout | Conv2DTranspose + UpSampling2D + Dropout | **Renkli modelde aktif** |
+
+**Ortak mimari özellikler:**
+- **Aktivasyon:** ELU (Exponential Linear Unit) iç katmanlarda; Sigmoid çıkış katmanında
+- **Dropout:** %30–%40 oranında (overfitting'i önlemek için)
+- **Kernel başlatma:** He Normal (`kernel_initializer='he_normal'`)
+- **Loss fonksiyonu:** MSE (Mean Squared Error); alternatif olarak SSIM loss tanımlı (`ssim_loss`)
+- **Optimizer:** Adam
+- **Padding:** `same` (boyut korumalı)
+
+**Encoder-Decoder akışı (create_advanced_autoencoder örneği):**
+
+```
+Giriş (544×544×1)
+    ↓ Conv2D(16, 3×3) + MaxPool(2×2) + Dropout(0.3)
+    ↓ Conv2D(32, 3×3) + MaxPool(2×2)
+    ↓ Conv2D(64, 3×3)           ← Bottleneck (en sıkıştırılmış temsil)
+    ↓ Conv2DTranspose(64, 3×3) + UpSampling(2×2) + Dropout(0.3)
+    ↓ Conv2DTranspose(32, 3×3) + UpSampling(2×2) + Dropout(0.3)
+    ↓ Conv2DTranspose(16, 3×3)
+    ↓ Conv2DTranspose(1, 3×3, activation='relu')
+Çıkış (544×544×1)
+```
+
+---
+
+## 🔀 Kanal Stratejileri
+
+Proje üç farklı kanal kombinasyonunu destekler:
+
+| Strateji | Eğitim Script | Çıkarım Script | Giriş | Çıkış | Kullanım Senaryosu |
+|---|---|---|---|---|---|
+| **Gri → Gri** | `..._3_kanal_to_1_kanal.py` | `harita_uretici_beta_gpt_hizli.py` | 1 kanal gri uydu | 1 kanal gri harita | Sade harita stili |
+| **Renkli → Renkli** | `..._renkli.py` | `harita_uretici_beta_gpt_hizli_renkli.py` | 3 kanal RGB uydu | 3 kanal RGB harita | Renkli harita stili |
+| **RGB → Gri** | `..._3_kanal_to_1_kanal.py` | `..._3_kanal_to_1_kanal.py` | 3 kanal RGB uydu | 1 kanal gri harita | RGB'den sade harita |
+
+**Farklar:**
+- Gri varyantta histogram eşitleme uygulanır (`cv2.equalizeHist` ve `tfa.image.equalize`)
+- Renkli varyantta BGR↔RGB dönüşümü gerekir (`cv2.COLOR_BGR2RGB`)
+- Gri çıktılar `pyplot.imsave` ile (cmap=gray), renkli çıktılar `cv2.imwrite` ile kaydedilir
+
+---
+
+## 📊 Veri Akışı (Dosya/Klasör Bazında)
+
+```
+urgup_bingmap_30cm_utm.tif          ← Girdi: Ürgüp uydu görüntüsü (~30 cm/piksel)
+    │
+    ├──[Aşama 1: Bölme]──────────> bolunmus/bolunmus/urgup_bingmap_30cm_utm/
+    │                                  goruntu_0_0.jpg   (544×544 piksel)
+    │                                  goruntu_0_1.jpg
+    │                                  goruntu_0_2.jpg
+    │                                  ...
+    │                                  goruntu_43_59.jpg  (toplam 2.640 parça)
+    │
+    ├──[Aşama 2: Eğitim]─────────> son_model.h5         ← Eğitilmiş model ağırlıkları
+    │   (ayrı veri seti ile)          checkpoint_*.h5     ← Epoch bazlı yedekler
+    │                                  ↓
+    │                              modeller/ klasörüne kopyalanır
+    │
+    ├──[Aşama 3a: Inference]──────> c:/d_surucusu/parcalar/urgup_bingma_model1.h5/
+    │   (veya parcalar/)               goruntu_goruntu_0_0.jpg  (model çıktısı)
+    │                                  goruntu_goruntu_0_1.jpg
+    │                                  ...
+    │
+    ├──[Aşama 3b: Birleştirme]────> ana_haritalar/
+    │                                  ana_harita_urgup_bingma_model1.h5.jpg  (tam boyut mozaik)
+    │
+    └──[Aşama 4: Jeoreferans]─────> georefli/harita/
+         (referans raster gerekli)     ana_harita_..._geo.tif      (LZW sıkıştırmalı GeoTIFF)
+                                    georefli/
+                                       ..._UTM_geo_r.tif           (JPEG sıkıştırmalı final)
+```
+
+---
+
+## 🔄 Dosyaların Evrimsel İlişkisi
+
+Proje iteratif olarak geliştirilmiştir. Dosyalar arasındaki evrimsel ilişki:
+
+```
+İlk Sürümler (deleted/ klasöründe arşivlenmiş):
+  autoencoder.py, autu_eoncoder_without_gan.py, autoencoder_gun_pure_keras.py
+  goruntu_birlestirme.py, harita_uretici.py, georef_eski_ve_eksik.py
+       │
+       ▼
+Orta Sürümler (kök dizinde, hâlâ kullanılabilir):
+  goruntu bolme_beta.py ──────── basit karo bölme (prosedürel, tek script)
+  harita_uretici_beta_gpt.py ── basit çıkarım (threading yok)
+  georef.py ───────────────────── basit jeoreferans (hardcoded referans)
+       │
+       ▼
+Gelişmiş Sürümler (kök dizinde, aktif kullanımda):
+  goruntu bolme.py ──────────────── fonksiyonel karo bölme (hata kontrolü, parametrik)
+  harita_uretici_beta_gpt_hizli.py ── threading + çoklu model + paralel çıkarım
+  harita_uretici_beta_gpt_hizli_renkli.py ── renkli varyant
+  harita_uretici_beta_gpt_hizli_3_kanal_to_1_kanal.py ── 3→1 kanal varyant
+  georef_gpt.py ─────────────────── düzenlenmiş jeoreferans (iki aşamalı)
+       │
+       ▼
+Son Sürüm (birleşik, önerilen):
+  goruntu_islemleri.py ──── tüm işlemler tek dosyada, OOP (ImageProcessor sınıfı),
+                            CLI (argparse), otomatik referans seçimi, progress bar,
+                            akıllı bölme atlama, metadata desteği
+```
 
 ---
 
@@ -713,6 +985,19 @@ python "georef_gpt.py"
 **Çıktılar:**
 - `georef_gpt.py`: `georefli/<harita>_UTM_geo_r.tif`
 - `georef_gpt-ertugrul.py`: `georefli/harita/<harita>_UTM_geo_r.tif`
+
+---
+
+## 📌 Özet
+
+Bu proje, bir tez kapsamında geliştirilen **uydu görüntüsünden otomatik harita üretim sistemidir**. İş hattı 4 aşamadan oluşur:
+
+1. **Bölme:** Büyük uydu görüntüsü (~30 cm/piksel) 512–544 piksellik karolara bölünür
+2. **Eğitim:** Yan yana ikili veriyle (uydu | harita) autoencoder modeli eğitilir
+3. **Çıkarım + Birleştirme:** Karolar modelden geçirilip mozaiklenir
+4. **Jeoreferanslama:** Sonuç GeoTIFF formatında koordinatlandırılır
+
+Proje Kapadokya bölgesi (Ürgüp, Karlık) üzerinde çalışılmakta olup, gri/tek kanal ve renkli olmak üzere birden fazla kanal stratejisini destekler. `goruntu_islemleri.py` dosyası tüm bu adımları tek komutla çalıştırabilir.
 
 ---
 

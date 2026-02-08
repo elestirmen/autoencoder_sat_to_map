@@ -1439,8 +1439,8 @@ def main():
 
 if __name__ == "__main__":
     # Varsayılan değerler
-    #DEFAULT_INPUT_IMAGE = "urgup_bingmap_30cm_utm.tif"
-    DEFAULT_INPUT_IMAGE = "karlik_30_cm_bingmap_utm.tif"
+    DEFAULT_INPUT_IMAGE = "urgup_bingmap_30cm_utm.tif"
+    #DEFAULT_INPUT_IMAGE = "karlik_30_cm_bingmap_utm.tif"
     DEFAULT_MODEL_DIR = "modeller"
     DEFAULT_REFERENCE_DIR = "georeferans_sample"  # Referans dosyalarının bulunduğu klasör
     DEFAULT_REFERENCE_RASTER = None  # None ise otomatik bulunur
