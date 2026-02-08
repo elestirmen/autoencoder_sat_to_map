@@ -5,9 +5,26 @@ Görüntü İşlemleri Modülü
 Bu modül görüntü bölme, birleştirme ve jeoreferanslama işlemlerini içerir.
 Tüm fonksiyonlar robust hata kontrolü ve esnek parametrelerle donatılmıştır.
 
+Parametre İlişkileri.:
+    tile_size: Sabit karo boyutu (piksel) - sinir ağı girdisi (varsayılan: 544)
+    overlap: Komşu karolar arası örtüşme (piksel) (varsayılan: 128)
+    frame_size: Adım boyutu - DİNAMİK olarak hesaplanır: frame_size = tile_size - overlap
+    crop_overlap: Birleştirmede her kenardan kırpılacak piksel = overlap / 2
+    
+    Örnek: tile_size=544, overlap=128 → frame_size=416 (hesaplanır)
+
 Kullanım:
-    python goruntu_islemleri.py split --input image.tif --output_dir parcalar
+    # Yeni kullanım (tile_size ile - ÖNERİLEN):
+    python goruntu_islemleri.py split --input image.tif --output_dir parcalar --tile_size 544 --overlap 128
+    python goruntu_islemleri.py pipeline --input image.tif --tile_size 544 --overlap 128
+    
+    # Eski kullanım (frame_size ile - DEPRECATED):
+    python goruntu_islemleri.py split --input image.tif --output_dir parcalar --frame_size 512 --overlap 32
+    
+    # Birleştirme (metadata'dan otomatik okur):
     python goruntu_islemleri.py merge --input_dir parcalar --output merged.jpg
+    
+    # Jeoreferanslama:
     python goruntu_islemleri.py georef --input image.jpg --reference ref.tif --output geo.tif
 """
 
@@ -27,14 +44,20 @@ import re
 # bu değerleri kullanır.
 #
 # ÖNEMLİ PARAMETRE İLİŞKİLERİ:
-#   frame_size + overlap = karo boyutu = image_size  (eşleşmeli!)
+#   tile_size = frame_size + overlap                 (karo boyutu sabit!)
+#   frame_size = tile_size - overlap                 (adım boyutu hesaplanır)
 #   crop_overlap = overlap / 2                       (eşleşmeli!)
 #
 #   Örnek (varsayılan):
-#     frame_size=512, overlap=32  →  karo boyutu = 544
-#     image_size=(544,544)        →  model girdisi = 544  ✓ eşleşiyor
-#     crop_overlap=16             →  16*2=32 = overlap    ✓ eşleşiyor
-#     Birleştirme sonrası net karo = 544 - 32 = 512 = frame_size  ✓
+#     tile_size=544 (sabit)       →  model girdisi = 544  ✓ eşleşiyor
+#     overlap=128                 →  örtüşme miktarı
+#     frame_size=416 (hesaplanan) →  416 = 544 - 128      ✓ doğru
+#     crop_overlap=64             →  64*2=128 = overlap   ✓ eşleşiyor
+#     Birleştirme sonrası net karo = 544 - 128 = 416 = frame_size  ✓
+#
+#   DİKKAT: tile_size sabit tutulur (sinir ağı girdisi), frame_size dinamik
+#   olarak hesaplanır. Overlap artırıldığında tile_size değişmez, frame_size
+#   küçülür (daha fazla karo oluşur).
 # ============================================================================
 CONFIG = {
 
@@ -71,22 +94,32 @@ CONFIG = {
         #   bolunmus/bolunmus/<görüntü_adı>/goruntu_0_0.jpg
         "output_dir": "bolunmus/bolunmus",
 
-        # Grid adım boyutu (piksel). Orijinal görüntü bu boyutta adımlarla
-        # taranır. Her karonun gerçek boyutu frame_size + overlap olur.
+        # Sabit karo boyutu (piksel). Tüm karolar bu boyutta çıkarılır.
+        # Bu değer sinir ağının beklediği girdi boyutuyla eşleşmelidir.
         #
-        #   frame_size=512, overlap=32  →  karo boyutu = 544
+        # DİKKAT: Bu değer SABİTTİR ve image_size ile eşleşmelidir:
+        #   tile_size == image_size[0] == image_size[1]
         #
-        # DİKKAT: Bu değer image_size ile şu ilişkide olmalıdır:
-        #   frame_size + overlap == image_size[0] == image_size[1]
-        # Aksi halde karolar inference'da yeniden boyutlandırılır (distorsiyon!).
-        "frame_size": 512,
+        # Overlap artırıldığında tile_size değişmez, frame_size küçülür.
+        "tile_size": 544,
+
+        # Grid adım boyutu (piksel). Bu değer ARTIK DİNAMİK OLARAK HESAPLANIR:
+        #   frame_size = tile_size - overlap
+        #
+        # Eski davranış (geriye uyumluluk): Eğer frame_size parametresi
+        # verilirse, tile_size = frame_size + overlap olarak hesaplanır.
+        # Ancak bu kullanım önerilmez (deprecated).
+        #
+        # Örnek: tile_size=544, overlap=128 → frame_size=416 (hesaplanır)
+        # "frame_size": 512,  # REMOVED - artık dinamik hesaplanıyor
 
         # Her karonun kenarına eklenen örtüşme pikseli. Komşu karolarla
         # örtüşme sağlayarak birleştirme sonrası dikiş izlerini azaltır.
         #
-        # İlişki: crop_overlap = overlap / 2  (birleştirmede her kenardan
-        # kırpılacak piksel miktarı bu değerin yarısıdır).
-        "overlap": 32,
+        # İlişki: 
+        #   frame_size = tile_size - overlap  (adım boyutu hesaplanır)
+        #   crop_overlap = overlap / 2        (birleştirmede her kenardan kırpılır)
+        "overlap": 128,
 
         # Dosya adı öneki. Karolar "{prefix}_{satır}_{sütun}.{format}"
         # şeklinde adlandırılır. Örn: goruntu_0_0.jpg, goruntu_3_12.jpg
@@ -97,7 +130,7 @@ CONFIG = {
         "format": "jpg",
 
         # True ise bölme sonrası metadata.json dosyası oluşturulur.
-        # Metadata grid boyutları, frame_size, overlap gibi bilgileri içerir
+        # Metadata grid boyutları, tile_size, frame_size, overlap gibi bilgileri içerir
         # ve birleştirme aşamasında otomatik okunur.
         "save_metadata": False,
 
@@ -128,14 +161,17 @@ CONFIG = {
         # Bölme sırasında eklenen örtüşme (overlap) burada kırpılır.
         # Formül: crop_overlap = overlap / 2
         #
-        #   overlap=32 → crop_overlap=16
-        #   Karo boyutu 544 → 544 - 16*2 = 512 = frame_size  ✓
+        #   overlap=128 → crop_overlap=64
+        #   Karo boyutu 544 → 544 - 64*2 = 416 = frame_size  ✓
         #
         # Bu değer yanlışsa parçalar arası boşluk veya üst üste binme oluşur.
-        "crop_overlap": 16,
+        "crop_overlap": 64,
 
-        # Karo boyutu (piksel). None ise ilk karonun boyutundan algılanır.
-        # Manuel belirtilmesi genellikle gerekmez.
+        # Adım boyutu (piksel). Bu değer metadata.json'dan okunur.
+        # None ise metadata'dan veya karo boyutundan otomatik hesaplanır.
+        #
+        # DİKKAT: Bu değer artık metadata'dan okunmalıdır. Manuel belirtmek
+        # yerine split işlemi sırasında oluşturulan metadata.json kullanılmalıdır.
         "frame_size": None,
 
         # True ise dosyalar natsort ile doğal sıralama ile sıralanır.
@@ -173,17 +209,26 @@ CONFIG = {
         # Çıktı: georefli/harita/<dosya>_geo.tif
         "georef_output_dir": "georefli/harita",
 
+        # Sabit karo boyutu (piksel). Tüm karolar bu boyutta çıkarılır.
+        # Bu değer sinir ağının beklediği girdi boyutuyla eşleşmelidir.
+        #
+        # DİKKAT: tile_size SABİTTİR ve image_size ile eşleşmelidir:
+        #   tile_size == image_size[0] == image_size[1]
+        #
+        # Overlap artırıldığında tile_size değişmez, frame_size küçülür.
+        "tile_size": 544,
+
         # Model girdi boyutu (yükseklik, genişlik). Tüm karolar bu boyuta
         # yeniden boyutlandırılarak modele verilir.
         #
-        # DİKKAT: frame_size + overlap ile eşleşmelidir!
-        #   frame_size=512, overlap=32 → karo=544 → image_size=(544,544)  ✓
+        # DİKKAT: tile_size ile eşleşmelidir!
+        #   tile_size=544 → image_size=(544,544)  ✓
         #   Eşleşmezse karolar sıkıştırılır/genişletilir (kalite kaybı!).
         "image_size": (544, 544),
 
         # Modelin renk modu.
         #   "grayscale": 1 kanallı gri tonlamalı giriş/çıkış.
-        #                Histogram eşitleme (equalizeHist) otomatik uygulanır.
+        #                Ek histogram eşitleme uygulanmaz.
         #   "rgb":       3 kanallı renkli giriş/çıkış.
         #                BGR↔RGB dönüşümü otomatik yapılır.
         "color_mode": "grayscale",
@@ -482,8 +527,9 @@ class ImageProcessor:
     def split_image(
         self,
         img: np.ndarray,
-        frame_size: int = CONFIG["split"]["frame_size"],
+        tile_size: int = CONFIG["split"]["tile_size"],
         overlap: int = CONFIG["split"]["overlap"],
+        frame_size: Optional[int] = None,
         output_dir: str = CONFIG["split"]["output_dir"],
         prefix: str = CONFIG["split"]["prefix"],
         format: str = CONFIG["split"]["format"],
@@ -495,28 +541,93 @@ class ImageProcessor:
         """
         Görüntüyü küçük parçalara böler.
         
+        Bu metod görüntüyü sabit boyutlu karolara (tiles) böler. Karo boyutu (tile_size)
+        sabittir ve sinir ağının beklediği girdi boyutuyla eşleşmelidir. Adım boyutu
+        (frame_size) dinamik olarak tile_size - overlap formülüyle hesaplanır.
+        
         Args:
-            img: Görüntü array'i
-            frame_size: Her parçanın boyutu (piksel)
-            overlap: Parçalar arası örtüşme (piksel)
-            output_dir: Çıktı dizini
-            prefix: Dosya adı öneki
+            img: Görüntü array'i (numpy array)
+            tile_size: Sabit karo boyutu (piksel). Tüm karolar bu boyutta çıkarılır.
+                      Bu değer sinir ağının girdi boyutuyla eşleşmelidir. (varsayılan: 544)
+            overlap: Komşu karolar arası örtüşme (piksel). Daha fazla örtüşme daha fazla
+                    karo oluşturur ancak tile_size sabit kalır. (varsayılan: 128)
+            frame_size: (DEPRECATED) Geriye uyumluluk için. Eğer belirtilirse,
+                       tile_size = frame_size + overlap olarak hesaplanır.
+                       Yeni kodda tile_size kullanılmalıdır. (varsayılan: None)
+            output_dir: Karoların kaydedileceği dizin
+            prefix: Dosya adı öneki (örn: "goruntu" → goruntu_0_0.jpg)
             format: Kayıt formatı ('jpg', 'png', 'tif')
-            save_metadata: Metadata kaydedilsin mi (jeoreferans için)
+            save_metadata: True ise metadata.json dosyası oluşturulur
             original_path: Orijinal görüntü yolu (metadata için)
+            show_progress: True ise progress bar gösterilir
+            keep_in_memory: True ise karolar RAM'de tutulur
             
         Returns:
-            Tuple (parçalar listesi, dosya isimleri listesi, metadata dict)
+            Tuple[List[np.ndarray], List[str], Dict[str, Any]]:
+                - Karo listesi (keep_in_memory=True ise dolu, False ise boş)
+                - Dosya yolları listesi
+                - Metadata sözlüğü (tile_size, frame_size, overlap, grid boyutları vb.)
             
         Raises:
-            ValueError: Geçersiz parametreler verilirse
+            ValueError: Geçersiz parametreler verilirse (tile_size <= 0, overlap < 0,
+                       overlap >= tile_size, vb.)
+                       
+        Notlar:
+            - Karo boyutu (tile_size) SABİTTİR ve değişmez
+            - Adım boyutu (frame_size) DİNAMİK olarak hesaplanır: frame_size = tile_size - overlap
+            - Overlap artırıldığında tile_size sabit kalır, frame_size küçülür (daha fazla karo)
+            - Sınır karoları tile_size'dan küçük olabilir (görüntü kenarlarında)
+            
+        Örnek:
+            >>> processor = ImageProcessor()
+            >>> img = cv2.imread("image.tif")
+            >>> tiles, files, meta = processor.split_image(
+            ...     img, tile_size=544, overlap=128, output_dir="tiles/"
+            ... )
+            >>> print(f"Frame size: {meta['frame_size']}")  # 544 - 128 = 416
+            >>> print(f"Tile count: {len(tiles)}")
         """
-        if frame_size <= 0:
-            raise ValueError("frame_size 0'dan büyük olmalıdır")
+        # 1. BACKWARD COMPATIBILITY CHECK
+        if frame_size is not None and tile_size == CONFIG["split"]["tile_size"]:
+            # Legacy mode: user provided frame_size, calculate tile_size
+            logger.warning(
+                "Parameter 'frame_size' is deprecated. "
+                "Use 'tile_size' instead. "
+                "Calculating tile_size = frame_size + overlap for compatibility."
+            )
+            tile_size = frame_size + overlap
+        elif frame_size is not None and tile_size != CONFIG["split"]["tile_size"]:
+            # Both provided: tile_size takes precedence
+            logger.warning(
+                "Both 'tile_size' and 'frame_size' provided. "
+                "Using 'tile_size' and ignoring 'frame_size'."
+            )
+        
+        # 2. PARAMETER VALIDATION
+        if tile_size <= 0:
+            raise ValueError("tile_size must be greater than 0")
         if overlap < 0:
-            raise ValueError("overlap negatif olamaz")
-        if overlap >= frame_size:
-            raise ValueError("overlap frame_size'dan küçük olmalıdır")
+            raise ValueError("overlap cannot be negative")
+        if overlap >= tile_size:
+            raise ValueError(
+                f"overlap ({overlap}) must be less than tile_size ({tile_size}). "
+                f"Current configuration would result in frame_size <= 0."
+            )
+        
+        # 3. CALCULATE FRAME SIZE
+        calculated_frame_size = tile_size - overlap
+        
+        if calculated_frame_size <= 0:
+            raise ValueError(
+                f"Calculated frame_size ({calculated_frame_size}) must be positive. "
+                f"Reduce overlap or increase tile_size."
+            )
+        
+        # 4. LOG CONFIGURATION
+        logger.info(f"Tiling configuration:")
+        logger.info(f"  Tile size: {tile_size}x{tile_size} (fixed)")
+        logger.info(f"  Overlap: {overlap}px")
+        logger.info(f"  Frame size (step): {calculated_frame_size}px (calculated)")
         
         height, width = img.shape[:2]
         
@@ -524,19 +635,19 @@ class ImageProcessor:
         self.create_output_directory(output_dir)
         
         # Kaç parça oluşturulacağını hesapla
-        num_frames_x = int(height / frame_size)
-        num_frames_y = int(width / frame_size)
+        num_frames_x = int(height / calculated_frame_size)
+        num_frames_y = int(width / calculated_frame_size)
         
-        logger.info(f"Görüntü boyutu: {height}x{width}")
-        logger.info(f"Parça sayısı: {num_frames_x}x{num_frames_y} = {num_frames_x * num_frames_y}")
-        logger.info(f"Parça boyutu: {frame_size}x{frame_size}, Örtüşme: {overlap}px")
+        logger.info(f"Image size: {height}x{width}")
+        logger.info(f"Grid dimensions: {num_frames_x}x{num_frames_y} = {num_frames_x * num_frames_y} tiles")
         
         img_cropped = []
         filenames = []
         metadata = {
+            'tile_size': tile_size,
+            'frame_size': calculated_frame_size,
             'num_frames_x': num_frames_x,
             'num_frames_y': num_frames_y,
-            'frame_size': frame_size,
             'overlap': overlap,
             'original_size': (height, width),
             'original_path': original_path
@@ -560,10 +671,10 @@ class ImageProcessor:
         for i in range(num_frames_x):
             for j in range(num_frames_y):
                 # Başlangıç ve bitiş koordinatlarını hesapla
-                start_y = frame_size * i
-                end_y = min(frame_size * (i + 1) + overlap, height)
-                start_x = frame_size * j
-                end_x = min(frame_size * (j + 1) + overlap, width)
+                start_y = calculated_frame_size * i
+                end_y = min(start_y + tile_size, height)
+                start_x = calculated_frame_size * j
+                end_x = min(start_x + tile_size, width)
                 
                 # Parçayı kes
                 crop = img[start_y:end_y, start_x:end_x]
@@ -599,19 +710,31 @@ class ImageProcessor:
         num_frames_x: Optional[int] = None,
         num_frames_y: Optional[int] = None,
         crop_overlap: int = CONFIG["merge"]["crop_overlap"],
-        frame_size: Optional[int] = CONFIG["merge"]["frame_size"],
+        frame_size: Optional[int] = None,
+        tile_size: Optional[int] = None,
         sort_files: bool = CONFIG["merge"]["sort_files"]
     ) -> np.ndarray:
         """
         Parçalara bölünmüş görüntüleri birleştirir.
         
+        Bu metod, split_image() tarafından oluşturulan parçaları birleştirir.
+        tile_size ve frame_size parametreleri metadata.json dosyasından otomatik
+        olarak yüklenir. Manuel olarak sağlanmazlarsa, metadata'dan okunur.
+        
+        Parametre İlişkileri:
+        - tile_size: Orijinal parça boyutu (ör. 544x544)
+        - frame_size: Adım boyutu = tile_size - overlap (ör. 512)
+        - crop_overlap: Her kenardan kırpılacak piksel = overlap / 2 (ör. 16)
+        - Kırpılmış parça boyutu = tile_size - 2*crop_overlap = frame_size
+        
         Args:
             input_dir: Parçaların bulunduğu dizin
             output_path: Birleştirilmiş görüntünün kaydedileceği yol
-            num_frames_x: X eksenindeki parça sayısı (None ise otomatik hesaplanır)
-            num_frames_y: Y eksenindeki parça sayısı (None ise otomatik hesaplanır)
+            num_frames_x: X eksenindeki parça sayısı (None ise metadata'dan veya otomatik hesaplanır)
+            num_frames_y: Y eksenindeki parça sayısı (None ise metadata'dan veya otomatik hesaplanır)
             crop_overlap: Her kenardan kırpılacak piksel sayısı (overlap/2 olmalı, ör. overlap=32 → crop_overlap=16)
-            frame_size: Her parçanın boyutu (None ise otomatik algılanır)
+            frame_size: Adım boyutu (None ise metadata'dan okunur veya hesaplanır)
+            tile_size: Orijinal parça boyutu (None ise metadata'dan okunur veya ilk parçadan algılanır)
             sort_files: Dosyaları sırala mı (natsort kullanarak)
             
         Returns:
@@ -619,6 +742,7 @@ class ImageProcessor:
             
         Raises:
             ValueError: Geçersiz parametreler veya dosya bulunamazsa
+            FileNotFoundError: input_dir bulunamazsa
         """
         if not os.path.exists(input_dir):
             raise FileNotFoundError(f"Dizin bulunamadı: {input_dir}")
@@ -635,6 +759,39 @@ class ImageProcessor:
         
         logger.info(f"{len(files)} dosya bulundu: {input_dir}")
         
+        # Metadata.json dosyasını yüklemeye çalış
+        metadata_path = os.path.join(input_dir, 'metadata.json')
+        metadata = None
+        
+        if os.path.exists(metadata_path):
+            try:
+                import json
+                with open(metadata_path, 'r') as f:
+                    metadata = json.load(f)
+                logger.info(f"Metadata yüklendi: {metadata_path}")
+                
+                # Metadata'dan parametreleri çıkar
+                if tile_size is None and 'tile_size' in metadata:
+                    tile_size = metadata['tile_size']
+                    logger.info(f"  tile_size metadata'dan yüklendi: {tile_size}")
+                
+                if frame_size is None and 'frame_size' in metadata:
+                    frame_size = metadata['frame_size']
+                    logger.info(f"  frame_size metadata'dan yüklendi: {frame_size}")
+                
+                if num_frames_x is None and 'num_frames_x' in metadata:
+                    num_frames_x = metadata['num_frames_x']
+                    logger.info(f"  num_frames_x metadata'dan yüklendi: {num_frames_x}")
+                
+                if num_frames_y is None and 'num_frames_y' in metadata:
+                    num_frames_y = metadata['num_frames_y']
+                    logger.info(f"  num_frames_y metadata'dan yüklendi: {num_frames_y}")
+                    
+            except Exception as e:
+                logger.warning(f"Metadata yüklenemedi: {e}")
+        else:
+            logger.info(f"Metadata dosyası bulunamadı: {metadata_path}")
+        
         # İlk görüntüyü yükle ve boyutları al
         first_img_path = os.path.join(input_dir, files[0])
         first_img = cv2.imread(first_img_path)
@@ -643,12 +800,25 @@ class ImageProcessor:
         
         img_height, img_width = first_img.shape[:2]
         
-        # Frame size'ı belirle
+        # tile_size'ı belirle (metadata'dan yüklenmediyse)
+        if tile_size is None:
+            # İlk görüntünün boyutunu kullan
+            tile_size = min(img_height, img_width)
+            logger.warning(f"tile_size metadata'da bulunamadı, ilk görüntüden algılandı: {tile_size}")
+        
+        # Frame size'ı belirle (metadata'dan yüklenmediyse)
         if frame_size is None:
-            # Dosya adından çıkarmaya çalış (örn: goruntu_0_0.jpg)
-            # Veya ilk görüntünün boyutunu kullan
-            frame_size = min(img_height, img_width)
-            logger.info(f"Frame size otomatik algılandı: {frame_size}")
+            # tile_size - (crop_overlap * 2) olarak hesapla
+            frame_size = tile_size - (crop_overlap * 2)
+            logger.warning(f"frame_size metadata'da bulunamadı, hesaplandı: tile_size - (crop_overlap * 2) = {frame_size}")
+        
+        # Parametrelerin geçerliliğini kontrol et
+        if tile_size <= 0:
+            raise ValueError(f"tile_size ({tile_size}) pozitif olmalıdır")
+        if frame_size <= 0:
+            raise ValueError(f"frame_size ({frame_size}) pozitif olmalıdır")
+        if crop_overlap < 0:
+            raise ValueError(f"crop_overlap ({crop_overlap}) negatif olamaz")
         
         # Parça sayılarını belirle
         if num_frames_x is None or num_frames_y is None:
@@ -685,6 +855,16 @@ class ImageProcessor:
                     logger.info(f"Dosya adlarından parça sayısı çıkarıldı: {num_frames_x}x{num_frames_y}")
         
         logger.info(f"Birleştirme parametreleri: {num_frames_x}x{num_frames_y}, crop_overlap={crop_overlap}")
+        logger.info(f"Birleştirme yapılandırması:")
+        logger.info(f"  Karo boyutu: {tile_size}x{tile_size}")
+        logger.info(f"  Frame boyutu: {frame_size}px")
+        logger.info(f"  Kırpma örtüşmesi: {crop_overlap}px (her kenardan)")
+        logger.info(f"  Grid: {num_frames_x}x{num_frames_y}")
+        
+        # Beklenen birleştirilmiş görüntü boyutlarını hesapla
+        expected_height = num_frames_x * frame_size
+        expected_width = num_frames_y * frame_size
+        logger.info(f"  Beklenen birleştirilmiş boyut: {expected_height}x{expected_width}")
         
         # Tüm görüntüleri yükle (progress bar ile)
         img_array = []
@@ -697,10 +877,33 @@ class ImageProcessor:
                 logger.warning(f"Görüntü yüklenemedi, atlanıyor: {img_path}")
                 continue
             
+            # Yüklenen karonun boyutlarını doğrula
+            h, w = img.shape[:2]
+            if h != tile_size or w != tile_size:
+                logger.warning(
+                    f"Karo {img_file} beklenmeyen boyuta sahip: {h}x{w}, "
+                    f"beklenen: {tile_size}x{tile_size}"
+                )
+            
             # Örtüşme kenarlarını kırp (her kenardan crop_overlap piksel)
             if crop_overlap > 0:
-                h, w = img.shape[:2]
                 img = img[crop_overlap:h-crop_overlap, crop_overlap:w-crop_overlap]
+            
+            # Kırpılmış boyutları doğrula
+            cropped_h, cropped_w = img.shape[:2]
+            expected_size = tile_size - (crop_overlap * 2)
+            
+            if cropped_h != expected_size or cropped_w != expected_size:
+                logger.warning(
+                    f"Kırpılmış karo boyutu {cropped_h}x{cropped_w}, "
+                    f"beklenen: {expected_size}x{expected_size}"
+                )
+            
+            if cropped_h != frame_size or cropped_w != frame_size:
+                logger.warning(
+                    f"Kırpılmış karo boyutu ({cropped_h}x{cropped_w}) "
+                    f"frame_size ({frame_size}x{frame_size}) ile eşleşmiyor"
+                )
             
             img_array.append(img)
         
@@ -738,6 +941,19 @@ class ImageProcessor:
         merged_image = rows[0]
         for i in range(1, len(rows)):
             merged_image = np.vstack((merged_image, rows[i]))
+        
+        # Birleştirilmiş görüntü boyutlarını doğrula
+        actual_height, actual_width = merged_image.shape[:2]
+        expected_height = num_frames_x * frame_size
+        expected_width = num_frames_y * frame_size
+        
+        if actual_height != expected_height or actual_width != expected_width:
+            logger.warning(
+                f"Birleştirilmiş görüntü boyutu ({actual_height}x{actual_width}) "
+                f"beklenen boyuttan ({expected_height}x{expected_width}) farklı!"
+            )
+        else:
+            logger.info(f"Birleştirilmiş görüntü boyutu doğrulandı: {actual_height}x{actual_width}")
         
         # Çıktı dizinini oluştur
         output_dir = os.path.dirname(output_path)
@@ -991,10 +1207,7 @@ class ImageProcessor:
                     if color_mode == "grayscale":
                         pixels = load_img(filepath, target_size=image_size, color_mode="grayscale")
                         pixels = img_to_array(pixels)
-                        # Histogram eşitleme
-                        pixels_2d = pixels[:, :, 0].astype(np.uint8)
-                        pixels_2d = cv2.equalizeHist(pixels_2d)
-                        pixels = pixels_2d.reshape(image_size[0], image_size[1], 1).astype(np.float32)
+                        pixels = pixels.astype(np.float32)
                         pixels = (pixels - 127.5) / 127.5
                     else:
                         pixels = load_img(filepath, target_size=image_size)
@@ -1069,7 +1282,8 @@ class ImageProcessor:
         input_image: str,
         model_path: Optional[str] = CONFIG["pipeline"]["model_path"],
         model_dir: Optional[str] = CONFIG["pipeline"]["model_dir"],
-        split_frame_size: int = CONFIG["split"]["frame_size"],
+        split_tile_size: int = CONFIG["pipeline"]["tile_size"],
+        split_frame_size: Optional[int] = None,
         split_overlap: int = CONFIG["split"]["overlap"],
         split_output_dir: str = CONFIG["pipeline"]["split_output_dir"],
         processed_output_dir: str = CONFIG["pipeline"]["processed_output_dir"],
@@ -1088,7 +1302,8 @@ class ImageProcessor:
             input_image: Giriş görüntü dosyası
             model_path: Tek model dosyası yolu (veya model_dir kullanılır)
             model_dir: Model dosyalarının bulunduğu dizin (tüm modeller işlenir)
-            split_frame_size: Bölme işlemi için frame boyutu
+            split_tile_size: Sabit karo boyutu (piksel) - sinir ağı girdisi (varsayılan: 544)
+            split_frame_size: (DEPRECATED) Adım boyutu - tile_size kullanın
             split_overlap: Bölme işlemi için örtüşme
             split_output_dir: Bölünmüş parçaların dizini
             processed_output_dir: Model'den geçmiş parçaların dizini
@@ -1212,8 +1427,9 @@ class ImageProcessor:
                 
                 img_cropped, filenames, metadata = self.split_image(
                     img,
-                    frame_size=split_frame_size,
+                    tile_size=split_tile_size,
                     overlap=split_overlap,
+                    frame_size=split_frame_size,
                     output_dir=split_output_dir_with_name,  # Görüntü adıyla klasör
                     prefix='goruntu',
                     format='jpg',
@@ -1349,7 +1565,8 @@ class ImageProcessor:
                         num_frames_x=num_frames_x,
                         num_frames_y=num_frames_y,
                         crop_overlap=crop_overlap,
-                        frame_size=split_frame_size
+                        tile_size=metadata.get('tile_size'),
+                        frame_size=metadata.get('frame_size')
                     )
                     
                     results['merge'].append({
@@ -1374,7 +1591,8 @@ class ImageProcessor:
                     num_frames_x=num_frames_x,
                     num_frames_y=num_frames_y,
                     crop_overlap=crop_overlap,
-                    frame_size=split_frame_size
+                    tile_size=metadata.get('tile_size'),
+                    frame_size=metadata.get('frame_size')
                 )
                 
                 results['merge'].append({
@@ -1516,7 +1734,18 @@ Ornekler:
         default=split_cfg["output_dir"],
         help=f'Cikti dizini (varsayilan: {split_cfg["output_dir"]})'
     )
-    split_parser.add_argument('--frame_size', type=int, default=split_cfg["frame_size"], help='Parca boyutu (piksel)')
+    split_parser.add_argument(
+        '--tile_size',
+        type=int,
+        default=split_cfg["tile_size"],
+        help='Sabit karo boyutu (piksel) - sinir agi girdisi (varsayilan: 544)'
+    )
+    split_parser.add_argument(
+        '--frame_size',
+        type=int,
+        default=None,
+        help='(DEPRECATED) Adim boyutu - tile_size kullanin'
+    )
     split_parser.add_argument('--overlap', type=int, default=split_cfg["overlap"], help='Ortusme miktari (piksel)')
     split_parser.add_argument('--prefix', default=split_cfg["prefix"], help='Dosya adi oneki')
     split_parser.add_argument('--format', default=split_cfg["format"], choices=['jpg', 'png', 'tif'], help='Cikti formati')
@@ -1540,7 +1769,8 @@ Ornekler:
     merge_parser.add_argument('--num_frames_x', type=int, help='X eksenindeki parca sayisi')
     merge_parser.add_argument('--num_frames_y', type=int, help='Y eksenindeki parca sayisi')
     merge_parser.add_argument('--crop_overlap', type=int, default=merge_cfg["crop_overlap"], help='Birlestirmede kullanilacak ortusme genisligi')
-    merge_parser.add_argument('--frame_size', type=int, default=merge_cfg["frame_size"], help='Parca boyutu (otomatik algilanir)')
+    merge_parser.add_argument('--tile_size', type=int, default=None, help='Karo boyutu (metadata\'dan okunur)')
+    merge_parser.add_argument('--frame_size', type=int, default=None, help='Parca boyutu (metadata\'dan okunur)')
 
     # Pipeline command
     pipeline_parser = subparsers.add_parser('pipeline', help='Tam pipeline: Bol -> Inference -> Birlestir -> Jeoreferansla')
@@ -1556,7 +1786,18 @@ Ornekler:
         help=f'Model dosyalarinin bulundugu dizin (varsayilan: {pipeline_cfg["model_dir"]})'
     )
     pipeline_parser.add_argument('--model_path', default=pipeline_cfg["model_path"], help='Tek model dosyasi yolu (model_dir yerine)')
-    pipeline_parser.add_argument('--frame_size', type=int, default=split_cfg["frame_size"], help='Parca boyutu (piksel)')
+    pipeline_parser.add_argument(
+        '--tile_size',
+        type=int,
+        default=split_cfg["tile_size"],
+        help='Sabit karo boyutu (piksel) - sinir agi girdisi (varsayilan: 544)'
+    )
+    pipeline_parser.add_argument(
+        '--frame_size',
+        type=int,
+        default=None,
+        help='(DEPRECATED) Adim boyutu - tile_size kullanin'
+    )
     pipeline_parser.add_argument('--overlap', type=int, default=split_cfg["overlap"], help='Bolme ortusme miktari (piksel)')
     pipeline_parser.add_argument('--crop_overlap', type=int, default=merge_cfg["crop_overlap"], help='Birlestirmede kullanilacak ortusme genisligi')
     pipeline_parser.add_argument('--color_mode', default=pipeline_cfg["color_mode"], choices=['grayscale', 'rgb'], help='Renk modu')
@@ -1595,7 +1836,8 @@ Ornekler:
         args.command = 'split'
         args.input = split_cfg["input_image"]
         args.output_dir = split_cfg["output_dir"]
-        args.frame_size = split_cfg["frame_size"]
+        args.tile_size = split_cfg["tile_size"]
+        args.frame_size = None
         args.overlap = split_cfg["overlap"]
         args.prefix = split_cfg["prefix"]
         args.format = split_cfg["format"]
@@ -1615,8 +1857,9 @@ Ornekler:
 
             img_cropped, filenames, metadata = processor.split_image(
                 img,
-                frame_size=args.frame_size,
+                tile_size=args.tile_size,
                 overlap=args.overlap,
+                frame_size=args.frame_size,
                 output_dir=args.output_dir,
                 prefix=args.prefix,
                 format=args.format,
@@ -1648,6 +1891,7 @@ Ornekler:
                 num_frames_x=args.num_frames_x,
                 num_frames_y=args.num_frames_y,
                 crop_overlap=args.crop_overlap,
+                tile_size=args.tile_size,
                 frame_size=args.frame_size
             )
             logger.info("Birlestirme islemi tamamlandi!")
@@ -1666,6 +1910,7 @@ Ornekler:
                 input_image=args.input,
                 model_path=m_path,
                 model_dir=m_dir if os.path.exists(m_dir) else None,
+                split_tile_size=args.tile_size,
                 split_frame_size=args.frame_size,
                 split_overlap=args.overlap,
                 split_output_dir=pipeline_cfg["split_output_dir"],
@@ -1793,7 +2038,7 @@ if __name__ == "__main__":
                 input_image=split_cfg["input_image"],
                 model_path=pipeline_cfg["model_path"],
                 model_dir=pipeline_cfg["model_dir"] if os.path.exists(pipeline_cfg["model_dir"]) else None,
-                split_frame_size=split_cfg["frame_size"],
+                split_frame_size=None,
                 split_overlap=split_cfg["overlap"],
                 split_output_dir=pipeline_cfg["split_output_dir"],
                 processed_output_dir=pipeline_cfg["processed_output_dir"],
