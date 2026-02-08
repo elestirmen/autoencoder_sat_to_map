@@ -19,55 +19,231 @@ from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Any
 import re
 
-# Central config: manage all default parameters from one place.
+# ============================================================================
+# MERKEZI YAPILANDIRMA (CONFIG)
+# ============================================================================
+# Tüm varsayılan parametreler bu sözlükten okunur. Bir parametreyi değiştirmek
+# için buradaki değeri güncellemek yeterlidir; kodun geri kalanı otomatik olarak
+# bu değerleri kullanır.
+#
+# ÖNEMLİ PARAMETRE İLİŞKİLERİ:
+#   frame_size + overlap = karo boyutu = image_size  (eşleşmeli!)
+#   crop_overlap = overlap / 2                       (eşleşmeli!)
+#
+#   Örnek (varsayılan):
+#     frame_size=512, overlap=32  →  karo boyutu = 544
+#     image_size=(544,544)        →  model girdisi = 544  ✓ eşleşiyor
+#     crop_overlap=16             →  16*2=32 = overlap    ✓ eşleşiyor
+#     Birleştirme sonrası net karo = 544 - 32 = 512 = frame_size  ✓
+# ============================================================================
 CONFIG = {
+
+    # ── OpenCV Ayarları ─────────────────────────────────────────────────────
     "opencv": {
+        # OpenCV'nin okuyabileceği maksimum piksel sayısı. Büyük uydu
+        # görüntüleri (onbinlerce piksel) için varsayılan limiti aşmak gerekir.
+        # 2^40 ≈ 1 trilyon piksel; pratikte herhangi bir görüntüyü okuyabilir.
         "max_image_pixels": 2 ** 40,
     },
+
+    # ── Referans Raster Eşleştirme Ayarları ─────────────────────────────────
     "reference": {
+        # Jeoreferanslama için kullanılacak referans GeoTIFF dosyalarının
+        # bulunduğu klasör. Pipeline bu klasördeki dosyalar arasından
+        # görüntü adına göre en uygun referansı otomatik seçer.
         "default_dir": "georeferans_sample",
+
+        # Otomatik referans eşleştirmede kullanılan bölge anahtar kelimeleri.
+        # Görüntü dosya adında bu kelimelerden biri varsa, aynı kelimeyi
+        # içeren referans dosyasına +20 puan verilir.
+        # Yeni bölge eklemek için listeye ekleme yapın.
         "auto_match_keywords": ["urgup", "karlik", "kapadokya", "bern"],
     },
+
+    # ── Görüntü Bölme (Split) Ayarları ──────────────────────────────────────
     "split": {
+        # Varsayılan giriş görüntüsü. Parametresiz çalıştırmada veya
+        # CLI'da -i belirtilmediğinde bu dosya kullanılır.
         "input_image": "urgup_bingmap_30cm_utm.tif",
+
+        # Bölünmüş karoların kaydedileceği klasör.
+        # Pipeline modunda alt klasör olarak görüntü adı eklenir:
+        #   bolunmus/bolunmus/<görüntü_adı>/goruntu_0_0.jpg
         "output_dir": "bolunmus/bolunmus",
+
+        # Grid adım boyutu (piksel). Orijinal görüntü bu boyutta adımlarla
+        # taranır. Her karonun gerçek boyutu frame_size + overlap olur.
+        #
+        #   frame_size=512, overlap=32  →  karo boyutu = 544
+        #
+        # DİKKAT: Bu değer image_size ile şu ilişkide olmalıdır:
+        #   frame_size + overlap == image_size[0] == image_size[1]
+        # Aksi halde karolar inference'da yeniden boyutlandırılır (distorsiyon!).
         "frame_size": 512,
+
+        # Her karonun kenarına eklenen örtüşme pikseli. Komşu karolarla
+        # örtüşme sağlayarak birleştirme sonrası dikiş izlerini azaltır.
+        #
+        # İlişki: crop_overlap = overlap / 2  (birleştirmede her kenardan
+        # kırpılacak piksel miktarı bu değerin yarısıdır).
         "overlap": 32,
+
+        # Dosya adı öneki. Karolar "{prefix}_{satır}_{sütun}.{format}"
+        # şeklinde adlandırılır. Örn: goruntu_0_0.jpg, goruntu_3_12.jpg
         "prefix": "goruntu",
+
+        # Karo kayıt formatı. "jpg" lossy ama küçük boyut; "png" kayıpsız
+        # ama büyük; "tif" coğrafi veri için.
         "format": "jpg",
+
+        # True ise bölme sonrası metadata.json dosyası oluşturulur.
+        # Metadata grid boyutları, frame_size, overlap gibi bilgileri içerir
+        # ve birleştirme aşamasında otomatik okunur.
         "save_metadata": False,
+
+        # True ise bölme sonrası matplotlib ile tüm karolar görselleştirilir.
+        # Büyük görüntülerde (binlerce karo) çok yavaş olabilir.
         "visualize": False,
+
+        # True ise bölme sırasında tqdm progress bar gösterilir.
         "show_progress": True,
+
+        # True ise tüm karolar RAM'de tutulur (görselleştirme için gerekli).
+        # False ise sadece diske yazılır, RAM tasarrufu sağlar.
+        # Pipeline modunda otomatik olarak False kullanılır.
         "keep_in_memory": True,
     },
+
+    # ── Görüntü Birleştirme (Merge) Ayarları ────────────────────────────────
     "merge": {
+        # Birleştirilecek karoların bulunduğu varsayılan dizin.
+        # CLI'da -i ile değiştirilebilir.
         "input_dir": "parcalar",
+
+        # Birleştirilmiş görüntünün kaydedileceği varsayılan dosya adı.
+        # CLI'da -o ile değiştirilebilir.
         "output": "birlestirilmis.jpg",
+
+        # Her karonun HER KENARINDAN kırpılacak piksel sayısı.
+        # Bölme sırasında eklenen örtüşme (overlap) burada kırpılır.
+        # Formül: crop_overlap = overlap / 2
+        #
+        #   overlap=32 → crop_overlap=16
+        #   Karo boyutu 544 → 544 - 16*2 = 512 = frame_size  ✓
+        #
+        # Bu değer yanlışsa parçalar arası boşluk veya üst üste binme oluşur.
         "crop_overlap": 16,
+
+        # Karo boyutu (piksel). None ise ilk karonun boyutundan algılanır.
+        # Manuel belirtilmesi genellikle gerekmez.
         "frame_size": None,
+
+        # True ise dosyalar natsort ile doğal sıralama ile sıralanır.
+        # goruntu_0_0, goruntu_0_1, ..., goruntu_1_0 şeklinde doğru sıra.
+        # False ise işletim sisteminin varsayılan sıralaması kullanılır.
         "sort_files": True,
     },
+
+    # ── Tam Pipeline Ayarları ────────────────────────────────────────────────
     "pipeline": {
+        # Eğitilmiş model dosyalarının (.h5) bulunduğu klasör.
+        # Pipeline bu klasördeki TÜM .h5 dosyalarını otomatik bulur ve
+        # her biri ile ayrı ayrı inference yapar.
         "model_dir": "modeller",
+
+        # Tek bir model dosyası yolu. Belirtilirse model_dir yerine
+        # sadece bu model kullanılır. None ise model_dir kullanılır.
         "model_path": None,
+
+        # Bölünmüş karoların kaydedileceği üst klasör.
+        # Pipeline görüntü adıyla alt klasör oluşturur:
+        #   bolunmus/bolunmus/urgup_bingmap_30cm_utm/
         "split_output_dir": "bolunmus/bolunmus",
+
+        # Model inference çıktılarının kaydedileceği üst klasör.
+        # Pipeline görüntü adı ve model adıyla alt klasörler oluşturur:
+        #   parcalar/urgup_bingmap_30cm_utm/model_v1/
         "processed_output_dir": "parcalar",
+
+        # Birleştirilmiş mozaik haritaların kaydedileceği klasör.
+        # Çıktı: ana_haritalar/ana_harita_<görüntü>_<model>.jpg
         "merge_output_dir": "ana_haritalar",
+
+        # Jeoreferanslanmış GeoTIFF çıktılarının kaydedileceği klasör.
+        # Çıktı: georefli/harita/<dosya>_geo.tif
         "georef_output_dir": "georefli/harita",
+
+        # Model girdi boyutu (yükseklik, genişlik). Tüm karolar bu boyuta
+        # yeniden boyutlandırılarak modele verilir.
+        #
+        # DİKKAT: frame_size + overlap ile eşleşmelidir!
+        #   frame_size=512, overlap=32 → karo=544 → image_size=(544,544)  ✓
+        #   Eşleşmezse karolar sıkıştırılır/genişletilir (kalite kaybı!).
         "image_size": (544, 544),
+
+        # Modelin renk modu.
+        #   "grayscale": 1 kanallı gri tonlamalı giriş/çıkış.
+        #                Histogram eşitleme (equalizeHist) otomatik uygulanır.
+        #   "rgb":       3 kanallı renkli giriş/çıkış.
+        #                BGR↔RGB dönüşümü otomatik yapılır.
         "color_mode": "grayscale",
+
+        # Batch inference boyutu. Aynı anda kaç karonun GPU'ya verileceği.
+        # Büyük değer → hızlı ama çok GPU belleği gerektirir.
+        # Küçük değer → yavaş ama az bellek.
+        #
+        # Öneriler:  4 GB VRAM → 2-4  |  8 GB → 8-16  |  12+ GB → 16-32
+        # OutOfMemoryError alırsanız bu değeri düşürün.
         "batch_size": 16,
+
+        # Referans raster dosyalarının bulunduğu klasör.
+        # reference["default_dir"] ile aynı değer; pipeline içinden erişim
+        # kolaylığı için tekrarlanmıştır.
         "reference_dir": "georeferans_sample",
+
+        # Manuel referans raster dosyası yolu. None ise otomatik eşleştirme
+        # kullanılır (görüntü adına göre georeferans_sample/ klasöründen).
+        # Belirtilirse otomatik eşleştirme atlanır, bu dosya kullanılır.
         "reference_raster": None,
     },
+
+    # ── Jeoreferanslama (Georef) Ayarları ────────────────────────────────────
     "georef": {
+        # CLI'da georef alt komutunun varsayılan girişi.
+        # None ise input_dir klasöründeki tüm görüntüler işlenir.
+        # Bir dosya yolu verilirse sadece o dosya jeoreferanslanır.
         "input": None,
+
+        # Tek dosya belirtilmediğinde taranacak varsayılan dizin.
+        # Bu dizindeki tüm .jpg/.png/.tif dosyaları otomatik işlenir.
         "input_dir": "ana_haritalar",
+
+        # Varsayılan referans GeoTIFF dosyası. CLI'da -r ile değiştirilebilir.
+        # Bu dosyanın CRS, transform ve boyut bilgileri çıktıya kopyalanır.
+        # Pipeline modunda bu değer kullanılmaz (otomatik eşleştirme tercih edilir).
         "reference": "ana_harita_urgup_30_cm__Georefference_utm.tif",
+
+        # Varsayılan çıktı dosya yolu. None ise otomatik oluşturulur:
+        #   georefli/harita/<dosya_adı>_geo.tif
         "output": None,
+
+        # Çıktı dosyalarının kaydedileceği varsayılan dizin.
         "output_dir": "georefli/harita",
+
+        # Raster'dan okunacak band numarası (1-indexed).
+        # Gri tonlamalı görüntüler için 1, renkli için 1-2-3 ayrı okunabilir.
+        # Mevcut kodda sadece tek band destekleniyor.
         "band": 1,
+
+        # GeoTIFF sıkıştırma algoritması.
+        #   "LZW":     Kayıpsız, orta boyut. Varsayılan ve önerilen.
+        #   "DEFLATE":  Kayıpsız, LZW'den biraz daha küçük, biraz daha yavaş.
+        #   "JPEG":     Kayıplı, en küçük boyut. İkinci aşama optimize eder.
+        #   "NONE":     Sıkıştırma yok, en büyük boyut, en hızlı yazma.
         "compress": "LZW",
+
+        # NoData değeri. Bu piksel değeri "veri yok" olarak işaretlenir.
+        # None ise NoData tanımlanmaz. Genellikle 0 veya -9999 kullanılır.
         "nodata": None,
     },
 }
@@ -434,7 +610,7 @@ class ImageProcessor:
             output_path: Birleştirilmiş görüntünün kaydedileceği yol
             num_frames_x: X eksenindeki parça sayısı (None ise otomatik hesaplanır)
             num_frames_y: Y eksenindeki parça sayısı (None ise otomatik hesaplanır)
-            crop_overlap: Parçalar arası örtüşme genişliği (birleştirmede kullanılacak)
+            crop_overlap: Her kenardan kırpılacak piksel sayısı (overlap/2 olmalı, ör. overlap=32 → crop_overlap=16)
             frame_size: Her parçanın boyutu (None ise otomatik algılanır)
             sort_files: Dosyaları sırala mı (natsort kullanarak)
             
