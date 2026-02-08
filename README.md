@@ -462,91 +462,319 @@ conda install -c conda-forge tensorflow rasterio gdal opencv pillow matplotlib n
 
 ## 📖 Kullanım
 
-### ⭐ 0. Tek Dosyada Tüm İşlemler (Önerilen - YENİ!)
+### ⭐ 0. goruntu_islemleri.py -- Detaylı Kullanım Kılavuzu
 
-**`goruntu_islemleri.py`** script'i tüm işlemleri tek seferde yapar: Bölme → Model Inference → Birleştirme → Jeoreferanslama
+`goruntu_islemleri.py`, eğitim dışındaki tüm işlemleri (bölme, model inference, birleştirme, jeoreferanslama) tek dosyada toplayan ana script'tir. İki temel kullanım biçimi vardır: **parametresiz tam pipeline** ve **CLI alt komutları**.
 
 #### Özellikler
 
-- ✅ Parametre olmadan varsayılan değerlerle çalışma
-- ✅ Görüntü adına göre otomatik klasör oluşturma
-- ✅ Daha önce bölünmüş görüntüler için akıllı atlama
-- ✅ Görüntü adına göre otomatik referans raster seçimi
-- ✅ Progress bar ile ilerleme takibi
-- ✅ Çoklu model desteği (tüm modeller otomatik işlenir)
+- ✅ **Batch inference:** GPU'yu verimli kullanan toplu tahmin (ThreadPoolExecutor yerine)
+- ✅ **RAM optimizasyonu:** Pipeline modunda parçalar RAM'de tutulmaz, direkt diske yazılır
+- ✅ **Parametre olmadan çalışma:** Script içindeki varsayılan değerlerle tek komutla tam pipeline
+- ✅ **CLI ile esnek kontrol:** `pipeline`, `split`, `merge`, `georef` alt komutları
+- ✅ **Renk modu seçimi:** `--color_mode grayscale` veya `--color_mode rgb`
+- ✅ **Akıllı bölme atlama:** Daha önce bölünmüş görüntüler için bölme işlemini atlar
+- ✅ **Otomatik referans seçimi:** Görüntü adına göre en uygun referans raster'ı bulur
+- ✅ **Çoklu model desteği:** `modeller/` klasöründeki tüm `.h5` dosyaları otomatik işlenir
+- ✅ **Progress bar:** tqdm ile tüm işlemlerde ilerleme çubuğu
+- ✅ **Metadata kaydetme:** Bölme bilgileri `metadata.json` olarak otomatik kaydedilir
 
-#### Hazırlık
+---
 
-1. **Referans raster dosyalarını `georeferans_sample/` klasörüne koyun:**
-   ```powershell
-   # Klasör otomatik oluşturulur, veya manuel oluşturabilirsiniz
-   mkdir georeferans_sample
-   
-   # Referans dosyalarını kopyalayın
-   # Örnek:
-   # - ana_harita_urgup_30_cm__Georefference_utm.tif
-   # - ana_harita_karlik_30_cm_bingmap_Georeferans.tif
-   ```
+#### Ön Hazırlık
 
-2. **Modelleri `modeller/` klasörüne koyun** (opsiyonel - model yoksa sadece bölme ve birleştirme yapar)
+**1. Giriş görüntüsünü hazırlayın:**
 
-3. **Script içinde varsayılan görüntü dosyasını ayarlayın** (veya parametre ile belirtin)
+GeoTIFF formatında büyük uydu/ortofoto görüntüsü (örn: `urgup_bingmap_30cm_utm.tif`).
 
-#### Kullanım
+**2. Referans raster dosyalarını `georeferans_sample/` klasörüne koyun:**
 
 ```powershell
-# Parametre olmadan çalıştırma (varsayılan değerlerle)
-python goruntu_islemleri.py
+# Klasör ilk çalıştırmada otomatik oluşturulur, veya:
+mkdir georeferans_sample
 
-# Veya parametre ile:
-python goruntu_islemleri.py split -i image.tif
-python goruntu_islemleri.py merge -i parcalar -o merged.jpg
-python goruntu_islemleri.py georef -i image.jpg -r reference.tif -o geo.tif
+# Referans dosyalarını kopyalayın (aynı bölgenin koordinatlandırılmış TIF'i)
+# Örnek:
+#   ana_harita_urgup_30_cm__Georefference_utm.tif
+#   ana_harita_karlik_30_cm_bingmap_Georeferans.tif
 ```
 
-#### Varsayılan Değerler
+**3. Eğitilmiş modelleri `modeller/` klasörüne koyun (opsiyonel):**
 
-Script içinde (`if __name__ == "__main__":` bölümünde) varsayılan değerler ayarlanabilir:
+```powershell
+mkdir modeller
+# .h5 model dosyalarını bu klasöre kopyalayın
+# Model yoksa sadece bölme ve birleştirme yapılır
+```
+
+---
+
+#### Kullanım Yöntem 1: Parametresiz Tam Pipeline
+
+En basit kullanım -- script içindeki varsayılan değerlerle 4 adımı otomatik çalıştırır:
+
+```powershell
+python goruntu_islemleri.py
+```
+
+Bu komut sırasıyla şunları yapar:
+1. `DEFAULT_INPUT_IMAGE` dosyasını 512x512 karolara böler
+2. `modeller/` klasöründeki tüm modelleri her karo üzerinde çalıştırır
+3. Tahmin edilen karoları birleştirir
+4. Sonucu referans raster ile jeoreferanslar
+
+**Varsayılan değerleri özelleştirmek için** script'in sonundaki `if __name__ == "__main__":` bloğunu düzenleyin:
 
 ```python
-DEFAULT_INPUT_IMAGE = "karlik_30_cm_bingmap_utm.tif"
-DEFAULT_MODEL_DIR = "modeller"
-DEFAULT_REFERENCE_DIR = "georeferans_sample"
+DEFAULT_INPUT_IMAGE = "urgup_bingmap_30cm_utm.tif"  # Giriş görüntüsü
+DEFAULT_MODEL_DIR = "modeller"                       # Model klasörü
+DEFAULT_REFERENCE_DIR = "georeferans_sample"         # Referans raster klasörü
+DEFAULT_COLOR_MODE = "grayscale"                     # "grayscale" veya "rgb"
+DEFAULT_BATCH_SIZE = 16                              # GPU VRAM'a göre ayarlayın
 ```
 
-#### İşlem Akışı
+---
 
-1. **Bölme**: Görüntüyü `bolunmus/bolunmus/<görüntü_adı>/` klasörüne böler
-   - Klasör varsa ve içinde dosyalar varsa bölme atlanır
-   - Metadata kaydedilir (`metadata.json`)
+#### Kullanım Yöntem 2: CLI Alt Komutları
 
-2. **Model Inference**: `modeller/` klasöründeki tüm modelleri kullanarak inference yapar
-   - Her model için ayrı çıktı klasörü: `parcalar/<görüntü_adı>/<model_adı>/`
-   - Threading ile hızlı işleme
+Tam kontrol için 4 alt komut mevcuttur: `pipeline`, `split`, `merge`, `georef`
 
-3. **Birleştirme**: Her model için ayrı birleştirme yapar
-   - Çıktı: `ana_haritalar/ana_harita_<görüntü_adı>_<model_adı>.jpg`
+##### `pipeline` -- Tam pipeline (Önerilen)
 
-4. **Jeoreferanslama**: Görüntü adına göre otomatik referans bulur ve jeoreferanslar
-   - Referans: `georeferans_sample/` klasöründen otomatik seçilir
-   - Çıktı: `georefli/harita/<dosya_adı>_geo.tif`
+Tüm adımları parametrelerle kontrol ederek çalıştırır:
 
-#### Referans Raster Eşleştirme
+```powershell
+# Varsayılan parametrelerle
+python goruntu_islemleri.py pipeline -i urgup_bingmap_30cm_utm.tif
 
-Script görüntü dosya adından anahtar kelimeleri çıkarır ve en uygun referansı bulur:
+# Renkli mod, küçük batch (düşük VRAM'lı GPU için)
+python goruntu_islemleri.py pipeline -i image.tif --color_mode rgb --batch_size 4
 
-- **Eşleştirme Puanlama:**
-  - Anahtar kelime eşleşmesi (urgup, karlik): +20 puan
-  - "ana_harita" ile başlayan dosyalar: +10 puan
-  - "georef", "reference" kelimeleri: +5 puan
-  - "utm" kelimesi: +3 puan
+# Tek model dosyası ile
+python goruntu_islemleri.py pipeline -i image.tif --model_path modeller/model_v2.h5
 
-**Örnek:**
-- Görüntü: `urgup_bingmap_30cm_utm.tif`
-- Referans: `ana_harita_urgup_30_cm__Georefference_utm.tif`
-- Puan: 20 (urgup) + 10 (ana_harita) + 5 (georef) + 3 (utm) = **38 puan** ✅
+# Manuel referans raster belirterek
+python goruntu_islemleri.py pipeline -i image.tif --reference georeferans_sample/ref.tif
 
-#### Çıktı Örneği
+# Tüm parametreleri özelleştirerek
+python goruntu_islemleri.py pipeline \
+    -i karlik_30_cm_bingmap_utm.tif \
+    --model_dir modeller \
+    --frame_size 512 \
+    --overlap 32 \
+    --crop_overlap 16 \
+    --color_mode grayscale \
+    --batch_size 16 \
+    --reference_dir georeferans_sample
+```
+
+**Pipeline parametreleri:**
+
+| Parametre | Varsayılan | Açıklama |
+|---|---|---|
+| `-i`, `--input` | `urgup_bingmap_30cm_utm.tif` | Giriş görüntü dosyası |
+| `--model_dir` | `modeller` | Model dosyalarının bulunduğu dizin |
+| `--model_path` | `None` | Tek model dosyası (model_dir yerine) |
+| `--frame_size` | `512` | Karo boyutu (piksel) |
+| `--overlap` | `32` | Bölme sırasında örtüşme (piksel) |
+| `--crop_overlap` | `16` | Birleştirmede kesilecek örtüşme (piksel) |
+| `--color_mode` | `grayscale` | Renk modu: `grayscale` veya `rgb` |
+| `--batch_size` | `16` | Batch boyutu (GPU VRAM'a göre ayarlayın) |
+| `--reference` | `None` (otomatik) | Referans raster dosyası |
+| `--reference_dir` | `georeferans_sample` | Referans raster dizini |
+
+##### `split` -- Sadece görüntü bölme
+
+```powershell
+# Varsayılan parametrelerle
+python goruntu_islemleri.py split
+
+# Özelleştirilmiş parametrelerle
+python goruntu_islemleri.py split -i image.tif -o parcalar --frame_size 544 --overlap 32
+
+# Metadata kaydet ve görselleştir
+python goruntu_islemleri.py split -i image.tif --save_metadata --visualize
+
+# PNG formatında kaydet
+python goruntu_islemleri.py split -i image.tif --format png
+```
+
+**Split parametreleri:**
+
+| Parametre | Varsayılan | Açıklama |
+|---|---|---|
+| `-i`, `--input` | `urgup_bingmap_30cm_utm.tif` | Giriş görüntü dosyası |
+| `-o`, `--output_dir` | `bolunmus/bolunmus` | Çıktı dizini |
+| `--frame_size` | `512` | Karo boyutu (piksel) |
+| `--overlap` | `32` | Örtüşme miktarı (piksel) |
+| `--prefix` | `goruntu` | Dosya adı öneki |
+| `--format` | `jpg` | Çıktı formatı: `jpg`, `png`, `tif` |
+| `--save_metadata` | `False` | Metadata'yı JSON olarak kaydet |
+| `--visualize` | `False` | Parçaları matplotlib ile görselleştir |
+
+##### `merge` -- Sadece parça birleştirme
+
+```powershell
+# Varsayılan parametrelerle
+python goruntu_islemleri.py merge
+
+# Dizin ve çıktı belirterek
+python goruntu_islemleri.py merge -i parcalar/urgup -o ana_haritalar/merged.jpg
+
+# Grid boyutlarını elle belirterek (dikdörtgen haritalar için)
+python goruntu_islemleri.py merge -i parcalar -o merged.jpg --num_frames_x 44 --num_frames_y 60
+
+# Örtüşme kırpması ile
+python goruntu_islemleri.py merge -i parcalar -o merged.jpg --crop_overlap 16
+```
+
+**Merge parametreleri:**
+
+| Parametre | Varsayılan | Açıklama |
+|---|---|---|
+| `-i`, `--input_dir` | `parcalar` | Parçaların bulunduğu dizin |
+| `-o`, `--output` | `birlestirilmis.jpg` | Çıktı dosyası |
+| `--num_frames_x` | otomatik | X eksenindeki parça sayısı |
+| `--num_frames_y` | otomatik | Y eksenindeki parça sayısı |
+| `--crop_overlap` | `0` | Her kenardan kesilecek örtüşme (piksel) |
+| `--frame_size` | otomatik | Parça boyutu |
+
+##### `georef` -- Sadece jeoreferanslama
+
+```powershell
+# Varsayılan dizindeki tüm dosyaları jeoreferansla
+python goruntu_islemleri.py georef
+
+# Tek dosya jeoreferansla
+python goruntu_islemleri.py georef -i ana_haritalar/harita.jpg -r referans.tif -o geo_harita.tif
+
+# Farklı sıkıştırma tipi ile
+python goruntu_islemleri.py georef -i harita.jpg -r referans.tif --compress JPEG
+
+# NoData değeri belirterek
+python goruntu_islemleri.py georef -i harita.jpg -r referans.tif --nodata 0
+```
+
+**Georef parametreleri:**
+
+| Parametre | Varsayılan | Açıklama |
+|---|---|---|
+| `-i`, `--input` | `ana_haritalar/` dizini | Giriş dosyası veya dizin |
+| `-r`, `--reference` | `ana_harita_urgup_30_cm__Georefference_utm.tif` | Referans GeoTIFF |
+| `-o`, `--output` | otomatik | Çıktı dosyası |
+| `--band` | `1` | Okunacak band numarası |
+| `--compress` | `LZW` | Sıkıştırma: `LZW`, `DEFLATE`, `JPEG`, `NONE` |
+| `--nodata` | `None` | NoData değeri |
+
+---
+
+#### Pipeline İşlem Adımları (Detaylı)
+
+`pipeline` veya parametresiz çalıştırıldığında sırasıyla şu adımlar gerçekleşir:
+
+**Adım 1 -- Görüntü Bölme:**
+- Giriş görüntüsü `frame_size` x `frame_size` (varsayılan 512x512) karolara bölünür
+- Her parçaya `overlap` (varsayılan 32) piksel örtüşme eklenir
+- Parçalar `bolunmus/bolunmus/<görüntü_adı>/goruntu_0_0.jpg` formatında kaydedilir
+- `metadata.json` otomatik oluşturulur (grid boyutları, frame_size vb.)
+- **Akıllı atlama:** Klasör zaten varsa ve içinde parçalar mevcutsa bölme atlanır
+- **RAM optimizasyonu:** Pipeline modunda parçalar bellekte tutulmaz, direkt diske yazılır
+
+**Adım 2 -- Model Inference (Batch):**
+- `modeller/` klasöründeki tüm `.h5` dosyaları sırayla yüklenir
+- Her model için parçalar `batch_size` kadar gruplar halinde GPU'ya verilir
+- `model.predict(batch)` ile toplu tahmin yapılır (tek tek predict'e göre çok daha hızlı)
+- Gri modda histogram eşitleme otomatik uygulanır
+- Her model için ayrı çıktı klasörü: `parcalar/<görüntü_adı>/<model_adı>/`
+- Model bulunamazsa bu adım atlanır
+
+**Adım 3 -- Mozaik Birleştirme:**
+- Tahmin edilen parçalar `natsorted` ile doğal sıralamaya alınır
+- Her parçanın dış kenarlarından `crop_overlap` (varsayılan 16) piksel kırpılır
+- Parçalar satır satır `hstack`, satırlar `vstack` ile birleştirilir
+- Çıktı: `ana_haritalar/ana_harita_<görüntü>_<model>.jpg`
+
+**Adım 4 -- Jeoreferanslama:**
+- Görüntü dosya adından anahtar kelimeler çıkarılır (urgup, karlik vb.)
+- `georeferans_sample/` klasöründeki referans rasterlar puanlanarak en iyi eşleşme seçilir
+- Referanstan CRS, transform, boyut bilgileri kopyalanır
+- Çıktı: `georefli/harita/<dosya>_geo.tif` (LZW sıkıştırmalı GeoTIFF)
+
+---
+
+#### Referans Raster Eşleştirme Sistemi
+
+Script, görüntü dosya adından anahtar kelimeleri çıkarıp `georeferans_sample/` klasöründeki referans dosyalarla otomatik eşleştirme yapar:
+
+**Puanlama kriterleri:**
+
+| Kriter | Puan | Örnek |
+|---|---|---|
+| Bölge adı eşleşmesi (urgup, karlik, kapadokya, bern) | +20 | `urgup` hem görüntüde hem referansta var |
+| `ana_harita` ile başlayan dosya | +10 | `ana_harita_urgup_...tif` |
+| `georef` veya `reference` kelimesi | +5 | `...Georefference_utm.tif` |
+| `utm` kelimesi | +3 | `..._utm.tif` |
+
+**Eşleştirme örneği:**
+
+```
+Görüntü:  urgup_bingmap_30cm_utm.tif
+Referans: ana_harita_urgup_30_cm__Georefference_utm.tif
+Puan:     20 (urgup) + 10 (ana_harita) + 5 (georef) + 3 (utm) = 38 puan  ✅
+```
+
+Eşleşme bulunamazsa `georeferans_sample/` klasöründeki ilk dosya varsayılan olarak kullanılır.
+
+---
+
+#### batch_size Seçimi
+
+`batch_size` parametresi, aynı anda kaç görüntünün GPU'ya gönderileceğini belirler:
+
+| GPU VRAM | Önerilen batch_size | Açıklama |
+|---|---|---|
+| 4 GB | 2-4 | Düşük bellek, yavaş ama güvenli |
+| 8 GB | 8-16 | Orta seviye GPU'lar için ideal |
+| 12+ GB | 16-32 | Yüksek bellek, maksimum hız |
+| CPU (GPU yok) | 4-8 | CPU'da batch büyütmek az fayda sağlar |
+
+Eğer `OutOfMemoryError` alıyorsanız `batch_size` değerini düşürün.
+
+---
+
+#### Çıktı Klasör Yapısı
+
+Pipeline çalıştırıldıktan sonra oluşan klasör yapısı:
+
+```
+bolunmus/bolunmus/
+└── urgup_bingmap_30cm_utm/          ← Bölünmüş parçalar
+    ├── goruntu_0_0.jpg
+    ├── goruntu_0_1.jpg
+    ├── ...
+    └── metadata.json                ← Grid boyutları ve parametreler
+
+parcalar/
+└── urgup_bingmap_30cm_utm/          ← Model çıktıları
+    ├── model_v1/
+    │   ├── goruntu_goruntu_0_0.jpg
+    │   └── ...
+    └── model_v2/
+        ├── goruntu_goruntu_0_0.jpg
+        └── ...
+
+ana_haritalar/                       ← Birleştirilmiş mozaikler
+├── ana_harita_urgup_bingmap_30cm_utm_model_v1.jpg
+└── ana_harita_urgup_bingmap_30cm_utm_model_v2.jpg
+
+georefli/harita/                     ← Jeoreferanslı GeoTIFF'ler
+├── ana_harita_urgup_..._model_v1_geo.tif
+└── ana_harita_urgup_..._model_v2_geo.tif
+```
+
+---
+
+#### Konsol Çıktı Örneği
 
 ```
 ============================================================
@@ -556,29 +784,82 @@ PARAMETRE VERİLMEDİ, VARSAYILAN DEĞERLERLE TAM PİPELİNE ÇALIŞTIRILIYOR
 1. ADIM: Görüntü Bölme
 ============================================================
 Parçalar bölünüyor: 100%|████████████| 2640/2640 [00:45<00:00, 58.2parça/s]
+Metadata kaydedildi: bolunmus/bolunmus/urgup_bingmap_30cm_utm/metadata.json
 ✓ Bölme tamamlandı: 2640 parça
 
 ============================================================
 2. ADIM: Model Inference
 ============================================================
-Model inference: 100%|████████████| 2640/2640 [05:23<00:00, 8.2görüntü/s]
-✓ Model model1 tamamlandı
+Model yükleniyor: modeller/model_v1.h5
+Model yüklendi.
+2640 dosya bulundu, batch inference başlatılıyor (batch_size=16)...
+Model inference: 100%|████████████| 2640/2640 [04:12<00:00, 10.5görüntü/s]
+✓ Model model_v1 tamamlandı
 
 ============================================================
 3. ADIM: Görüntü Birleştirme
 ============================================================
-✓ Birleştirme tamamlandı: ana_haritalar/ana_harita_karlik_30_cm_bingmap_utm_model1.jpg
+✓ Birleştirme tamamlandı: ana_haritalar/ana_harita_urgup_bingmap_30cm_utm_model_v1.jpg
 
 ============================================================
 4. ADIM: Jeoreferanslama
 ============================================================
 Referans dizininde 2 dosya bulundu: georeferans_sample
-✓ Referans raster bulundu: ana_harita_karlik_30_cm_bingmap_Georeferans.tif (eşleşme puanı: 38)
-  Görüntü: karlik_30_cm_bingmap_utm.tif
-  Referans: ana_harita_karlik_30_cm_bingmap_Georeferans.tif
+✓ Referans raster bulundu: ana_harita_urgup_30_cm__Georefference_utm.tif (eşleşme puanı: 38)
 Jeoreferanslama: 100%|████████████| 1/1 [00:12<00:00, 12.3s/dosya]
-✓ Jeoreferanslama tamamlandı
+
+============================================================
+TÜM İŞLEMLER TAMAMLANDI!
+============================================================
+
+============================================================
+İŞLEM ÖZETİ
+============================================================
+Bölme: 2640 parça oluşturuldu
+Inference: 1 model işlendi
+Birleştirme: 1 görüntü birleştirildi
+Jeoreferanslama: 1 görüntü jeoreferanslandı
+============================================================
 ```
+
+---
+
+#### Python'dan Modül Olarak Kullanım
+
+`goruntu_islemleri.py` doğrudan import edilerek Python kodunuzda da kullanılabilir:
+
+```python
+from goruntu_islemleri import ImageProcessor
+
+processor = ImageProcessor(reference_dir="georeferans_sample")
+
+# Tek tek adımlar
+img = processor.load_image("urgup_bingmap_30cm_utm.tif")
+crops, files, meta = processor.split_image(img, frame_size=512, overlap=32,
+                                           output_dir="parcalar", keep_in_memory=False)
+
+# Veya tam pipeline
+results = processor.run_full_pipeline(
+    input_image="urgup_bingmap_30cm_utm.tif",
+    model_dir="modeller",
+    color_mode="grayscale",
+    batch_size=16
+)
+```
+
+**ImageProcessor sınıfının metotları:**
+
+| Metot | Açıklama |
+|---|---|
+| `load_image(path)` | Görüntüyü yükler ve kontrol eder |
+| `get_geotransform(path)` | GeoTransform bilgilerini alır |
+| `split_image(img, ...)` | Görüntüyü karolara böler |
+| `merge_images(input_dir, ...)` | Karoları birleştirir |
+| `georeference_image(input, ref, ...)` | Jeoreferanslama yapar |
+| `process_images_with_model(...)` | Batch inference ile model çıkarımı |
+| `find_reference_raster(filename, ...)` | Otomatik referans raster bulur |
+| `visualize_crops(crops, ...)` | Parçaları görselleştirir |
+| `run_full_pipeline(...)` | Tüm adımları sırayla çalıştırır |
 
 ---
 
