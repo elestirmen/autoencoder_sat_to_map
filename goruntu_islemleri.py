@@ -17,8 +17,6 @@ import argparse
 import logging
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Any
-from concurrent.futures import ThreadPoolExecutor
-from functools import partial
 import re
 
 # Progress bar için tqdm
@@ -263,7 +261,8 @@ class ImageProcessor:
         format: str = 'jpg',
         save_metadata: bool = False,
         original_path: Optional[str] = None,
-        show_progress: bool = True
+        show_progress: bool = True,
+        keep_in_memory: bool = True
     ) -> Tuple[List[np.ndarray], List[str], Dict[str, Any]]:
         """
         Görüntüyü küçük parçalara böler.
@@ -350,7 +349,8 @@ class ImageProcessor:
                 else:
                     cv2.imwrite(filename, crop, [cv2.IMWRITE_JPEG_QUALITY, 95])
                 
-                img_cropped.append(crop)
+                if keep_in_memory:
+                    img_cropped.append(crop)
                 filenames.append(filename)
                 
                 if show_progress:
@@ -684,11 +684,14 @@ class ImageProcessor:
         model_path: str,
         image_size: Tuple[int, int] = (544, 544),
         color_mode: str = "grayscale",
-        crop_overlap: int = 16,
-        use_threading: bool = True
+        batch_size: int = 16
     ) -> List[str]:
         """
-        Parçalara bölünmüş görüntüleri sinir ağı modelinden geçirir.
+        Parçalara bölünmüş görüntüleri sinir ağı modelinden batch inference ile geçirir.
+        
+        Eski ThreadPoolExecutor yaklaşımı yerine toplu (batch) tahmin kullanır.
+        Bu yöntem GPU'yu daha verimli kullanır ve TensorFlow thread-safety
+        sorunlarını ortadan kaldırır.
         
         Args:
             input_dir: Giriş parçalarının bulunduğu dizin
@@ -696,8 +699,7 @@ class ImageProcessor:
             model_path: Model dosyasının yolu
             image_size: Görüntü boyutu (height, width)
             color_mode: Renk modu ("grayscale" veya "rgb")
-            crop_overlap: Örtüşme kesme miktarı
-            use_threading: Threading kullanılsın mı
+            batch_size: Batch boyutu (GPU VRAM'a göre ayarlayın, varsayılan: 16)
             
         Returns:
             İşlenmiş dosya isimlerinin listesi
@@ -741,77 +743,79 @@ class ImageProcessor:
         if len(files) == 0:
             raise ValueError(f"Dizinde görüntü dosyası bulunamadı: {input_dir}")
         
-        logger.info(f"{len(files)} dosya bulundu, model inference başlatılıyor...")
+        logger.info(f"{len(files)} dosya bulundu, batch inference başlatılıyor (batch_size={batch_size})...")
         
-        def load_image_for_model(filename: str) -> np.ndarray:
-            """Model için görüntü yükleme fonksiyonu."""
-            filepath = os.path.join(input_dir, filename)
-            if color_mode == "grayscale":
-                pixels = load_img(filepath, target_size=image_size, color_mode="grayscale")
-                pixels = img_to_array(pixels)
-                # Histogram eşitleme (opsiyonel)
-                pixels = cv2.equalizeHist(pixels.astype(np.uint8))
-                pixels = (pixels - 127.5) / 127.5
-            else:
-                pixels = load_img(filepath, target_size=image_size)
-                pixels = img_to_array(pixels)
-                pixels = (pixels - 127.5) / 127.5
+        channels = 1 if color_mode == "grayscale" else 3
+        output_files = []
+        
+        pbar = tqdm(total=len(files), desc="Model inference", unit="görüntü", ncols=100)
+        
+        # Batch inference ile işle
+        for batch_start in range(0, len(files), batch_size):
+            batch_files = files[batch_start:batch_start + batch_size]
+            batch_images = []
+            valid_indices = []
             
-            pixels = np.expand_dims(pixels, 0)
-            return pixels
-        
-        def process_single_image(filename: str) -> Optional[str]:
-            """Tek bir görüntüyü işle."""
+            # Batch için görüntüleri yükle
+            for idx, filename in enumerate(batch_files):
+                filepath = os.path.join(input_dir, filename)
+                try:
+                    if color_mode == "grayscale":
+                        pixels = load_img(filepath, target_size=image_size, color_mode="grayscale")
+                        pixels = img_to_array(pixels)
+                        # Histogram eşitleme
+                        pixels_2d = pixels[:, :, 0].astype(np.uint8)
+                        pixels_2d = cv2.equalizeHist(pixels_2d)
+                        pixels = pixels_2d.reshape(image_size[0], image_size[1], 1).astype(np.float32)
+                        pixels = (pixels - 127.5) / 127.5
+                    else:
+                        pixels = load_img(filepath, target_size=image_size)
+                        pixels = img_to_array(pixels)
+                        pixels = (pixels - 127.5) / 127.5
+                    batch_images.append(pixels)
+                    valid_indices.append(idx)
+                except Exception as e:
+                    logger.error(f"Görüntü yüklenemedi ({filename}): {e}")
+            
+            if len(batch_images) == 0:
+                pbar.update(len(batch_files))
+                continue
+            
+            batch_array = np.array(batch_images)
+            
+            # Toplu tahmin (batch prediction)
             try:
-                # Görüntüyü yükle
-                src_image = load_image_for_model(filename)
-                
-                # Model inference
-                gen_image = model.predict(src_image, verbose=0)
-                
-                # Çıktı dosya adı
-                base_name = os.path.splitext(filename)[0]
-                output_filename = os.path.join(output_dir, f'goruntu_{base_name}.jpg')
-                
-                # Görüntüyü kaydet
-                if len(gen_image[0].shape) == 2:
-                    # Grayscale
-                    goruntu = gen_image[0].reshape(image_size[0], image_size[1])
-                    pyplot.imsave(output_filename, goruntu, cmap=cm.gray)
-                elif len(gen_image[0].shape) == 3:
-                    # RGB
-                    goruntu = gen_image[0]
-                    # Normalize et [0, 1] -> [0, 255]
-                    if goruntu.max() <= 1.0:
-                        goruntu = (goruntu * 255).astype(np.uint8)
-                    cv2.imwrite(output_filename, cv2.cvtColor(goruntu, cv2.COLOR_RGB2BGR))
-                
-                return output_filename
+                predictions = model.predict(batch_array, verbose=0)
             except Exception as e:
-                logger.error(f"Görüntü işlenirken hata ({filename}): {e}")
-                return None
+                logger.error(f"Batch prediction hatası: {e}")
+                pbar.update(len(batch_files))
+                continue
+            
+            # Sonuçları kaydet
+            for pred_idx, file_idx in enumerate(valid_indices):
+                filename = batch_files[file_idx]
+                try:
+                    base_name = os.path.splitext(filename)[0]
+                    output_filename = os.path.join(output_dir, f'goruntu_{base_name}.jpg')
+                    
+                    pred = predictions[pred_idx]
+                    
+                    if color_mode == "grayscale" or pred.shape[-1] == 1:
+                        goruntu = pred.reshape(image_size[0], image_size[1])
+                        pyplot.imsave(output_filename, goruntu, cmap=cm.gray)
+                    else:
+                        goruntu = pred.copy()
+                        if goruntu.max() <= 1.0:
+                            goruntu = (goruntu * 255).astype(np.uint8)
+                        cv2.imwrite(output_filename, cv2.cvtColor(goruntu, cv2.COLOR_RGB2BGR))
+                    
+                    output_files.append(output_filename)
+                except Exception as e:
+                    logger.error(f"Görüntü kaydedilemedi ({filename}): {e}")
+            
+            pbar.update(len(batch_files))
         
-        # Threading ile işle (progress bar ile)
-        if use_threading:
-            with ThreadPoolExecutor() as executor:
-                if TQDM_AVAILABLE:
-                    results = list(tqdm(
-                        executor.map(process_single_image, files),
-                        total=len(files),
-                        desc="Model inference",
-                        unit="görüntü",
-                        ncols=100
-                    ))
-                else:
-                    results = list(executor.map(process_single_image, files))
-        else:
-            if TQDM_AVAILABLE:
-                results = [process_single_image(f) for f in tqdm(files, desc="Model inference", unit="görüntü", ncols=100)]
-            else:
-                results = [process_single_image(f) for f in files]
-        
-        # Başarılı sonuçları filtrele
-        output_files = [f for f in results if f is not None]
+        pbar.close()
         
         logger.info(f"Toplam {len(output_files)}/{len(files)} görüntü başarıyla işlendi.")
         
@@ -831,7 +835,8 @@ class ImageProcessor:
         georef_output_dir: str = "georefli/harita",
         crop_overlap: int = 16,
         image_size: Tuple[int, int] = (544, 544),
-        color_mode: str = "grayscale"
+        color_mode: str = "grayscale",
+        batch_size: int = 16
     ) -> Dict[str, Any]:
         """
         Tüm işlemleri sırayla çalıştırır: Böl -> Model Inference -> Birleştir -> Jeoreferansla
@@ -849,7 +854,8 @@ class ImageProcessor:
             georef_output_dir: Jeoreferanslı görüntülerin dizini
             crop_overlap: Birleştirme sırasında kesilecek örtüşme
             image_size: Model için görüntü boyutu
-            color_mode: Model için renk modu
+            color_mode: Model için renk modu ("grayscale" veya "rgb")
+            batch_size: Batch boyutu (GPU VRAM'a göre ayarlayın)
             
         Returns:
             İşlem sonuçlarını içeren dict
@@ -970,8 +976,16 @@ class ImageProcessor:
                     format='jpg',
                     save_metadata=True,
                     original_path=input_image,
-                    show_progress=True
+                    show_progress=True,
+                    keep_in_memory=False  # Pipeline'da RAM tasarrufu
                 )
+                
+                # Metadata'yı JSON olarak kaydet
+                import json
+                meta_path = os.path.join(split_output_dir_with_name, 'metadata.json')
+                with open(meta_path, 'w') as f:
+                    json.dump(metadata, f, indent=2, default=str)
+                logger.info(f"Metadata kaydedildi: {meta_path}")
                 
                 results['split'] = {
                     'num_pieces': len(filenames),
@@ -1017,7 +1031,7 @@ class ImageProcessor:
                                     model_path=model_path_full,
                                     image_size=image_size,
                                     color_mode=color_mode,
-                                    crop_overlap=crop_overlap
+                                    batch_size=batch_size
                                 )
                                 
                                 results['inference'].append({
@@ -1045,7 +1059,7 @@ class ImageProcessor:
                         model_path=model_path,
                         image_size=image_size,
                         color_mode=color_mode,
-                        crop_overlap=crop_overlap
+                        batch_size=batch_size
                     )
                     
                     results['inference'].append({
@@ -1223,6 +1237,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=f"""
 Örnekler:
+  # Tam pipeline (Böl → Inference → Birleştir → Jeoreferansla)
+  python goruntu_islemleri.py pipeline -i image.tif
+  python goruntu_islemleri.py pipeline -i image.tif --color_mode rgb --batch_size 8
+  python goruntu_islemleri.py pipeline -i image.tif --model_path model.h5 --reference ref.tif
+  
   # Görüntü bölme (varsayılan: {DEFAULT_INPUT_IMAGE})
   python goruntu_islemleri.py split
   python goruntu_islemleri.py split -i image.tif -o parcalar --frame_size 512 --overlap 32
@@ -1262,6 +1281,30 @@ def main():
     merge_parser.add_argument('--num_frames_y', type=int, help='Y eksenindeki parça sayısı')
     merge_parser.add_argument('--crop_overlap', type=int, default=0, help='Örtüşmeyi kesme miktarı')
     merge_parser.add_argument('--frame_size', type=int, help='Parça boyutu (otomatik algılanır)')
+    
+    # Pipeline komutu (tüm adımlar: Böl → Inference → Birleştir → Jeoreferansla)
+    pipeline_parser = subparsers.add_parser('pipeline', help='Tam pipeline: Böl → Inference → Birleştir → Jeoreferansla')
+    pipeline_parser.add_argument('-i', '--input', default=DEFAULT_INPUT_IMAGE,
+                                help=f'Giriş görüntü dosyası (varsayılan: {DEFAULT_INPUT_IMAGE})')
+    pipeline_parser.add_argument('--model_dir', default='modeller',
+                                help='Model dosyalarının bulunduğu dizin (varsayılan: modeller)')
+    pipeline_parser.add_argument('--model_path', default=None,
+                                help='Tek model dosyası yolu (model_dir yerine)')
+    pipeline_parser.add_argument('--frame_size', type=int, default=512,
+                                help='Parça boyutu (piksel, varsayılan: 512)')
+    pipeline_parser.add_argument('--overlap', type=int, default=32,
+                                help='Bölme örtüşme miktarı (piksel, varsayılan: 32)')
+    pipeline_parser.add_argument('--crop_overlap', type=int, default=16,
+                                help='Birleştirmede kesilecek örtüşme (piksel, varsayılan: 16)')
+    pipeline_parser.add_argument('--color_mode', default='grayscale',
+                                choices=['grayscale', 'rgb'],
+                                help='Renk modu (varsayılan: grayscale)')
+    pipeline_parser.add_argument('--batch_size', type=int, default=16,
+                                help='Batch boyutu - GPU VRAM\'a göre ayarlayın (varsayılan: 16)')
+    pipeline_parser.add_argument('--reference', default=None,
+                                help='Referans raster dosyası (varsayılan: otomatik seçim)')
+    pipeline_parser.add_argument('--reference_dir', default='georeferans_sample',
+                                help='Referans raster dizini (varsayılan: georeferans_sample)')
     
     # Georef komutu
     georef_parser = subparsers.add_parser('georef', help='Görüntüyü jeoreferansla')
@@ -1367,6 +1410,50 @@ def main():
             
             logger.info("Birleştirme işlemi tamamlandı!")
         
+        elif args.command == 'pipeline':
+            # Tam pipeline çalıştır
+            pipeline_processor = ImageProcessor(reference_dir=getattr(args, 'reference_dir', 'georeferans_sample'))
+            
+            # Referans raster'ı belirle
+            ref_raster = getattr(args, 'reference', None)
+            if not ref_raster:
+                ref_raster = pipeline_processor.find_reference_raster(
+                    args.input, getattr(args, 'reference_dir', 'georeferans_sample')
+                )
+            
+            # Model dizini kontrolü
+            m_dir = getattr(args, 'model_dir', 'modeller')
+            m_path = getattr(args, 'model_path', None)
+            
+            results = pipeline_processor.run_full_pipeline(
+                input_image=args.input,
+                model_path=m_path,
+                model_dir=m_dir if os.path.exists(m_dir) else None,
+                split_frame_size=getattr(args, 'frame_size', 512),
+                split_overlap=getattr(args, 'overlap', 32),
+                reference_raster=ref_raster,
+                crop_overlap=getattr(args, 'crop_overlap', 16),
+                image_size=(544, 544),
+                color_mode=getattr(args, 'color_mode', 'grayscale'),
+                batch_size=getattr(args, 'batch_size', 16)
+            )
+            
+            # Sonuçları özetle
+            logger.info("\n" + "=" * 60)
+            logger.info("İŞLEM ÖZETİ")
+            logger.info("=" * 60)
+            if results['split']:
+                logger.info(f"Bölme: {results['split']['num_pieces']} parça")
+            if results['inference']:
+                logger.info(f"Inference: {len(results['inference'])} model işlendi")
+            if results['merge']:
+                logger.info(f"Birleştirme: {len(results['merge'])} görüntü")
+            if results['georef']:
+                logger.info(f"Jeoreferanslama: {len(results['georef'])} dosya")
+            logger.info("=" * 60)
+            
+            logger.info("Pipeline tamamlandı!")
+        
         elif args.command == 'georef':
             # Jeoreferansla
             # Eğer input belirtilmemişse, varsayılan dizindeki tüm dosyaları işle
@@ -1444,6 +1531,8 @@ if __name__ == "__main__":
     DEFAULT_MODEL_DIR = "modeller"
     DEFAULT_REFERENCE_DIR = "georeferans_sample"  # Referans dosyalarının bulunduğu klasör
     DEFAULT_REFERENCE_RASTER = None  # None ise otomatik bulunur
+    DEFAULT_COLOR_MODE = "grayscale"  # "grayscale" veya "rgb"
+    DEFAULT_BATCH_SIZE = 16  # GPU VRAM'a göre ayarlayın
     
     # Eğer hiç argüman verilmemişse, varsayılan değerlerle tam pipeline çalıştır
     if len(sys.argv) == 1:
@@ -1484,7 +1573,8 @@ if __name__ == "__main__":
                 georef_output_dir="georefli/harita",
                 crop_overlap=16,
                 image_size=(544, 544),
-                color_mode="grayscale"
+                color_mode=DEFAULT_COLOR_MODE,
+                batch_size=DEFAULT_BATCH_SIZE
             )
             
             # Sonuçları özetle
