@@ -46,10 +46,10 @@ class Config:
     
     # ------------------------------ VERİ AYARLARI -----------------------------
     # Veri dizini yolu
-    DATA_DIR = "C:\\d_surucusu\\satmap\\output_full"
+    DATA_DIR = "maps_zoom_level_19\sonuclar_19"
     
     # Renk modu: "grayscale", "rgb", "grayscale_with_equalize"
-    COLOR_MODE = "grayscale"
+    COLOR_MODE = "rgb"
     
     # Eğitim/Doğrulama oranı (0.0 - 1.0 arası, eğitim için kullanılacak oran)
     TRAIN_SPLIT = 0.9
@@ -301,6 +301,46 @@ def load_and_preprocess_multiscale(image_path):
     return (input_img, label_img)
 
 
+def validate_image_files(image_paths):
+    """Bozuk veya boş görüntü dosyalarını tespit eder ve geçerli olanları döndürür."""
+    valid_paths = []
+    invalid_paths = []
+    
+    print("Görüntü dosyaları doğrulanıyor...")
+    
+    for path in image_paths:
+        try:
+            # Dosya boyutunu kontrol et
+            file_size = os.path.getsize(path)
+            if file_size == 0:
+                invalid_paths.append((path, "Boş dosya (0 byte)"))
+                continue
+            
+            # Dosyayı okumayı dene (ilk birkaç byte)
+            with open(path, 'rb') as f:
+                header = f.read(16)
+                if len(header) < 8:
+                    invalid_paths.append((path, "Dosya çok küçük"))
+                    continue
+            
+            valid_paths.append(path)
+            
+        except Exception as e:
+            invalid_paths.append((path, str(e)))
+    
+    # Bozuk dosyaları raporla
+    if invalid_paths:
+        print(f"\n⚠️  {len(invalid_paths)} bozuk/boş dosya tespit edildi:")
+        for path, reason in invalid_paths[:10]:  # İlk 10 tanesini göster
+            print(f"   - {os.path.basename(path)}: {reason}")
+        if len(invalid_paths) > 10:
+            print(f"   ... ve {len(invalid_paths) - 10} dosya daha")
+        print()
+    
+    print(f"Geçerli görüntü sayısı: {len(valid_paths)} / {len(image_paths)}")
+    return valid_paths
+
+
 def create_datasets():
     """Eğitim ve doğrulama veri setlerini oluşturur."""
     # Görüntü yollarını al
@@ -313,7 +353,13 @@ def create_datasets():
     if len(all_image_paths) == 0:
         raise ValueError(f"Veri dizininde görüntü bulunamadı: {Config.DATA_DIR}")
     
-    print(f"Toplam görüntü sayısı: {len(all_image_paths)}")
+    print(f"Toplam dosya sayısı: {len(all_image_paths)}")
+    
+    # Bozuk dosyaları filtrele
+    all_image_paths = validate_image_files(all_image_paths)
+    
+    if len(all_image_paths) == 0:
+        raise ValueError("Hiç geçerli görüntü dosyası bulunamadı!")
     
     # Random seed ayarla
     np.random.seed(Config.RANDOM_SEED)
@@ -352,13 +398,15 @@ def create_datasets():
         preprocess_fn = load_and_preprocess
         batch_size = Config.BATCH_SIZE
     
-    # Dataset oluştur
+    # Dataset oluştur - ignore_errors ile bozuk dosyaları atla
     train_dataset = tf.data.Dataset.from_tensor_slices(train_paths)
     train_dataset = train_dataset.map(preprocess_fn, num_parallel_calls=parallel_calls)
+    train_dataset = train_dataset.apply(tf.data.experimental.ignore_errors())  # Hataları atla
     train_dataset = train_dataset.batch(batch_size).prefetch(buffer_size=prefetch_buffer)
     
     val_dataset = tf.data.Dataset.from_tensor_slices(val_paths)
-    val_dataset = val_dataset.map(load_and_preprocess, num_parallel_calls=parallel_calls)  # Val her zaman sabit boyut
+    val_dataset = val_dataset.map(load_and_preprocess, num_parallel_calls=parallel_calls)
+    val_dataset = val_dataset.apply(tf.data.experimental.ignore_errors())  # Hataları atla
     val_dataset = val_dataset.batch(Config.BATCH_SIZE).prefetch(buffer_size=prefetch_buffer)
     
     return train_dataset, val_dataset
