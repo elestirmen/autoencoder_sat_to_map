@@ -334,10 +334,9 @@ os.environ["OPENCV_IO_MAX_IMAGE_PIXELS"] = str(CONFIG["opencv"]["max_image_pixel
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
-from osgeo import gdal
 from natsort import natsorted
 import rasterio
-from rasterio.transform import from_bounds
+from affine import Affine
 
 # Logging yapılandırması
 logging.basicConfig(
@@ -501,11 +500,15 @@ class ImageProcessor:
         Raises:
             ValueError: Raster açılamazsa
         """
-        raster = gdal.Open(path)
-        if raster is None:
-            raise ValueError(f"Raster açılamadı: {path}")
-        
-        gt = raster.GetGeoTransform()
+        try:
+            with rasterio.open(path) as raster:
+                transform = raster.transform
+        except Exception as e:
+            raise ValueError(f"Raster açılamadı: {path} ({e})")
+
+        # rasterio Affine -> GDAL geotransform tuple:
+        # (c, a, b, f, d, e)
+        gt = transform.to_gdal()
         pixelSizeX = gt[1]
         pixelSizeY = abs(gt[5])  # Negatif değeri pozitif yap
         
@@ -634,9 +637,21 @@ class ImageProcessor:
         # Çıktı dizinini oluştur
         self.create_output_directory(output_dir)
         
-        # Kaç parça oluşturulacağını hesapla
-        num_frames_x = int(height / calculated_frame_size)
-        num_frames_y = int(width / calculated_frame_size)
+        # Kaç parça oluşturulacağını hesapla (kenarlari tam kapsayacak sekilde)
+        def _compute_starts(length: int, tile: int, step: int) -> List[int]:
+            if length <= tile:
+                return [0]
+
+            starts = list(range(0, max(length - tile + 1, 1), step))
+            last_start = max(0, length - tile)
+            if len(starts) == 0 or starts[-1] != last_start:
+                starts.append(last_start)
+            return starts
+
+        y_starts = _compute_starts(height, tile_size, calculated_frame_size)
+        x_starts = _compute_starts(width, tile_size, calculated_frame_size)
+        num_frames_x = len(y_starts)
+        num_frames_y = len(x_starts)
         
         logger.info(f"Image size: {height}x{width}")
         logger.info(f"Grid dimensions: {num_frames_x}x{num_frames_y} = {num_frames_x * num_frames_y} tiles")
@@ -649,6 +664,8 @@ class ImageProcessor:
             'num_frames_x': num_frames_x,
             'num_frames_y': num_frames_y,
             'overlap': overlap,
+            'y_starts': y_starts,
+            'x_starts': x_starts,
             'original_size': (height, width),
             'original_path': original_path
         }
@@ -668,12 +685,10 @@ class ImageProcessor:
         if show_progress:
             pbar = tqdm(total=total_pieces, desc="Parçalar bölünüyor", unit="parça", ncols=100)
         
-        for i in range(num_frames_x):
-            for j in range(num_frames_y):
+        for i, start_y in enumerate(y_starts):
+            for j, start_x in enumerate(x_starts):
                 # Başlangıç ve bitiş koordinatlarını hesapla
-                start_y = calculated_frame_size * i
                 end_y = min(start_y + tile_size, height)
-                start_x = calculated_frame_size * j
                 end_x = min(start_x + tile_size, width)
                 
                 # Parçayı kes
@@ -860,100 +875,185 @@ class ImageProcessor:
         logger.info(f"  Frame boyutu: {frame_size}px")
         logger.info(f"  Kırpma örtüşmesi: {crop_overlap}px (her kenardan)")
         logger.info(f"  Grid: {num_frames_x}x{num_frames_y}")
-        
-        # Beklenen birleştirilmiş görüntü boyutlarını hesapla
-        expected_height = num_frames_x * frame_size
-        expected_width = num_frames_y * frame_size
-        logger.info(f"  Beklenen birleştirilmiş boyut: {expected_height}x{expected_width}")
-        
-        # Tüm görüntüleri yükle (progress bar ile)
-        img_array = []
-        pbar = tqdm(files, desc="Görüntüler yükleniyor", unit="dosya", ncols=100) if TQDM_AVAILABLE else files
-        
-        for img_file in pbar:
+
+        # Tüm görüntüleri yükle ve sadece iç kenarlardaki overlap'i kırp.
+        # Dış sınır korunur; böylece jeoreferanslama sırasında global ofset oluşmaz.
+        # Metadata'da varsa kesin yerlesim koordinatlarini kullan.
+        y_starts = None
+        x_starts = None
+        expected_original_size = None
+        if isinstance(metadata, dict):
+            raw_y_starts = metadata.get('y_starts')
+            raw_x_starts = metadata.get('x_starts')
+            raw_original_size = metadata.get('original_size')
+
+            if isinstance(raw_y_starts, list) and len(raw_y_starts) > 0:
+                try:
+                    y_starts = [int(v) for v in raw_y_starts]
+                except Exception:
+                    y_starts = None
+
+            if isinstance(raw_x_starts, list) and len(raw_x_starts) > 0:
+                try:
+                    x_starts = [int(v) for v in raw_x_starts]
+                except Exception:
+                    x_starts = None
+
+            if isinstance(raw_original_size, (list, tuple)) and len(raw_original_size) == 2:
+                try:
+                    expected_original_size = (int(raw_original_size[0]), int(raw_original_size[1]))
+                except Exception:
+                    expected_original_size = None
+
+        if y_starts is not None and len(y_starts) != num_frames_x:
+            logger.warning(
+                f"Metadata y_starts uzunlugu ({len(y_starts)}) "
+                f"num_frames_x ({num_frames_x}) ile uyusmuyor. Grid tabanli yerlestirme kullanilacak."
+            )
+            y_starts = None
+        if x_starts is not None and len(x_starts) != num_frames_y:
+            logger.warning(
+                f"Metadata x_starts uzunlugu ({len(x_starts)}) "
+                f"num_frames_y ({num_frames_y}) ile uyusmuyor. Grid tabanli yerlestirme kullanilacak."
+            )
+            x_starts = None
+        if (y_starts is None) != (x_starts is None):
+            logger.warning("Metadata start koordinatlari eksik. Grid tabanli yerlestirme kullanilacak.")
+            y_starts = None
+            x_starts = None
+        if y_starts is not None and x_starts is not None:
+            logger.info("Konumsal yerlestirme: metadata x_starts/y_starts kullanilacak")
+
+        # Dosyalari i/j indeksine gore esle. B?ylece stale dosyalar sirayi bozmaz.
+        expected_tiles = num_frames_x * num_frames_y
+        indexed_files: Dict[Tuple[int, int], str] = {}
+        unindexed_files = []
+        index_pattern = re.compile(r'_(\d+)_(\d+)\.[^.]+$')
+
+        for img_file in files:
+            m = index_pattern.search(img_file)
+            if not m:
+                unindexed_files.append(img_file)
+                continue
+            i = int(m.group(1))
+            j = int(m.group(2))
+            if i >= num_frames_x or j >= num_frames_y:
+                continue
+            key = (i, j)
+            if key in indexed_files:
+                logger.warning(
+                    f"Ayni karo indeksi icin birden fazla dosya bulundu ({i},{j}): "
+                    f"{indexed_files[key]} ve {img_file}. Son dosya kullanilacak."
+                )
+            indexed_files[key] = img_file
+
+        tile_plan = []
+        if len(indexed_files) > 0:
+            for i in range(num_frames_x):
+                for j in range(num_frames_y):
+                    img_file = indexed_files.get((i, j))
+                    if img_file is not None:
+                        tile_plan.append((i, j, img_file))
+            missing = expected_tiles - len(tile_plan)
+            if missing > 0:
+                logger.warning(
+                    f"Gridde beklenen {expected_tiles} karodan {missing} tanesi eksik. "
+                    f"Bulunan karo: {len(tile_plan)}"
+                )
+        else:
+            if len(unindexed_files) > 0:
+                logger.warning("Dosya adlarindan i/j indeksi okunamadi, sirali grid varsayimi kullanilacak.")
+            for tile_idx, img_file in enumerate(files[:expected_tiles]):
+                i = tile_idx // num_frames_y
+                j = tile_idx % num_frames_y
+                tile_plan.append((i, j, img_file))
+
+        if len(tile_plan) == 0:
+            raise ValueError("Birle?tirilecek g?r?nt? bulunamad?!")
+
+        # T?m g?r?nt?leri y?kle ve sadece i? kenarlardaki overlap'i k?rp.
+        # D?? s?n?r korunur; b?ylece jeoreferanslama s?ras?nda global ofset olu?maz.
+        tile_records = []
+        pbar = tqdm(tile_plan, desc="G?r?nt?ler y?kleniyor", unit="dosya", ncols=100) if TQDM_AVAILABLE else tile_plan
+
+        for i, j, img_file in pbar:
             img_path = os.path.join(input_dir, img_file)
             img = cv2.imread(img_path)
             if img is None:
-                logger.warning(f"Görüntü yüklenemedi, atlanıyor: {img_path}")
+                logger.warning(f"G?r?nt? y?klenemedi, atlan?yor: {img_path}")
                 continue
-            
-            # Yüklenen karonun boyutlarını doğrula
+
+            # Y?klenen karonun boyutlar?n? do?rula
             h, w = img.shape[:2]
             if h != tile_size or w != tile_size:
                 logger.warning(
                     f"Karo {img_file} beklenmeyen boyuta sahip: {h}x{w}, "
                     f"beklenen: {tile_size}x{tile_size}"
                 )
-            
-            # Örtüşme kenarlarını kırp (her kenardan crop_overlap piksel)
-            if crop_overlap > 0:
-                img = img[crop_overlap:h-crop_overlap, crop_overlap:w-crop_overlap]
-            
-            # Kırpılmış boyutları doğrula
-            cropped_h, cropped_w = img.shape[:2]
-            expected_size = tile_size - (crop_overlap * 2)
-            
-            if cropped_h != expected_size or cropped_w != expected_size:
+
+            # Sadece i? kenarlar k?rp?l?r, d?? s?n?r korunur.
+            top_crop = crop_overlap if i > 0 else 0
+            bottom_crop = crop_overlap if i < (num_frames_x - 1) else 0
+            left_crop = crop_overlap if j > 0 else 0
+            right_crop = crop_overlap if j < (num_frames_y - 1) else 0
+
+            y2 = h - bottom_crop if bottom_crop > 0 else h
+            x2 = w - right_crop if right_crop > 0 else w
+
+            if y2 <= top_crop or x2 <= left_crop:
                 logger.warning(
-                    f"Kırpılmış karo boyutu {cropped_h}x{cropped_w}, "
-                    f"beklenen: {expected_size}x{expected_size}"
+                    f"Karo {img_file} i?in k?rpma ge?ersiz: "
+                    f"({top_crop}, {bottom_crop}, {left_crop}, {right_crop}), "
+                    f"boyut={h}x{w}. Karo atland?."
                 )
-            
-            if cropped_h != frame_size or cropped_w != frame_size:
-                logger.warning(
-                    f"Kırpılmış karo boyutu ({cropped_h}x{cropped_w}) "
-                    f"frame_size ({frame_size}x{frame_size}) ile eşleşmiyor"
-                )
-            
-            img_array.append(img)
-        
+                continue
+
+            img = img[top_crop:y2, left_crop:x2]
+
+            # Hedef konum: metadata starts varsa onlari, yoksa frame_size grid'ini kullan.
+            if y_starts is not None and x_starts is not None:
+                dest_y = y_starts[i] + top_crop
+                dest_x = x_starts[j] + left_crop
+            else:
+                dest_y = (i * frame_size) + top_crop
+                dest_x = (j * frame_size) + left_crop
+
+            tile_records.append((img, dest_y, dest_x, img_file))
+
         if TQDM_AVAILABLE and isinstance(pbar, tqdm):
             pbar.close()
-        
-        if len(img_array) != num_frames_x * num_frames_y:
-            logger.warning(f"Yüklenen görüntü sayısı ({len(img_array)}) "
-                         f"beklenen sayıdan ({num_frames_x * num_frames_y}) farklı!")
-        
-        # Görüntüleri birleştir: basit hstack (yatay) + vstack (dikey)
-        rows = []
-        idx = 0
-        
-        for i in range(num_frames_x):
-            if idx >= len(img_array):
-                break
-            
-            # Yatay satır oluştur
-            row = img_array[idx]
-            idx += 1
-            
-            for j in range(1, num_frames_y):
-                if idx >= len(img_array):
-                    break
-                row = np.hstack((row, img_array[idx]))
-                idx += 1
-            
-            rows.append(row)
-        
-        # Satırları dikey olarak birleştir
-        if len(rows) == 0:
+
+        if len(tile_records) == 0:
             raise ValueError("Birleştirilecek görüntü bulunamadı!")
-        
-        merged_image = rows[0]
-        for i in range(1, len(rows)):
-            merged_image = np.vstack((merged_image, rows[i]))
-        
-        # Birleştirilmiş görüntü boyutlarını doğrula
-        actual_height, actual_width = merged_image.shape[:2]
-        expected_height = num_frames_x * frame_size
-        expected_width = num_frames_y * frame_size
-        
-        if actual_height != expected_height or actual_width != expected_width:
+
+        if len(tile_records) != expected_tiles:
             logger.warning(
-                f"Birleştirilmiş görüntü boyutu ({actual_height}x{actual_width}) "
-                f"beklenen boyuttan ({expected_height}x{expected_width}) farklı!"
+                f"Yuklenen goruntu sayisi ({len(tile_records)}) beklenen sayidan ({expected_tiles}) farkli!"
             )
+
+        # Çıktı boyutunu yerleştirme koordinatlarından hesapla.
+        max_height = max(dest_y + tile.shape[0] for tile, dest_y, dest_x, _ in tile_records)
+        max_width = max(dest_x + tile.shape[1] for tile, dest_y, dest_x, _ in tile_records)
+
+        sample_tile = tile_records[0][0]
+        if sample_tile.ndim == 2:
+            merged_image = np.zeros((max_height, max_width), dtype=sample_tile.dtype)
         else:
-            logger.info(f"Birleştirilmiş görüntü boyutu doğrulandı: {actual_height}x{actual_width}")
+            merged_image = np.zeros((max_height, max_width, sample_tile.shape[2]), dtype=sample_tile.dtype)
+
+        for tile, dest_y, dest_x, img_file in tile_records:
+            th, tw = tile.shape[:2]
+            merged_image[dest_y:dest_y + th, dest_x:dest_x + tw] = tile
+
+        actual_height, actual_width = merged_image.shape[:2]
+        if expected_original_size is not None:
+            exp_h, exp_w = expected_original_size
+            if actual_height != exp_h or actual_width != exp_w:
+                logger.warning(
+                    f"Birlestirilmis goruntu boyutu ({actual_height}x{actual_width}) "
+                    f"orijinal boyuttan ({exp_h}x{exp_w}) farkli."
+                )
+        logger.info(f"Birleştirilmiş görüntü boyutu: {actual_height}x{actual_width}")
         
         # Çıktı dizinini oluştur
         output_dir = os.path.dirname(output_path)
@@ -977,7 +1077,10 @@ class ImageProcessor:
         output_path: str,
         band: int = CONFIG["georef"]["band"],
         compress: str = CONFIG["georef"]["compress"],
-        nodata: Optional[float] = CONFIG["georef"]["nodata"]
+        nodata: Optional[float] = CONFIG["georef"]["nodata"],
+        target_transform: Optional[Any] = None,
+        target_crs: Optional[Any] = None,
+        force_reference_shape: bool = False
     ) -> None:
         """
         Görüntüyü referans raster'ın coğrafi bilgileriyle jeoreferanslar.
@@ -993,6 +1096,9 @@ class ImageProcessor:
             band: Okunacak band numarası (1-indexed, sadece tek band için)
             compress: Sıkıştırma tipi ('LZW', 'DEFLATE', 'JPEG', 'NONE')
             nodata: NoData değeri
+            target_transform: Çıktıya uygulanacak transform (None ise referans transformu)
+            target_crs: Çıktıya uygulanacak CRS (None ise referans CRS'i)
+            force_reference_shape: True ise çıktı boyutu referans raster ile aynı yapılır
             
         Raises:
             FileNotFoundError: Dosya bulunamazsa
@@ -1042,17 +1148,32 @@ class ImageProcessor:
         
         # Çıktı kanal sayısını belirle
         output_band_count = 3 if input_band_count >= 3 else 1
+
+        input_height = data.shape[1]
+        input_width = data.shape[2]
+        out_height = reference_raster.shape[0] if force_reference_shape else input_height
+        out_width = reference_raster.shape[1] if force_reference_shape else input_width
+
+        if not force_reference_shape and (input_height != reference_raster.shape[0] or input_width != reference_raster.shape[1]):
+            logger.warning(
+                f"Giriş boyutu ({input_height}x{input_width}) referans boyutundan "
+                f"({reference_raster.shape[0]}x{reference_raster.shape[1]}) farklı. "
+                f"Çıkış grid'i giriş boyutunda korunacak."
+            )
+
+        out_transform = target_transform if target_transform is not None else reference_raster.transform
+        out_crs = target_crs if target_crs is not None else reference_raster.crs
         
         # Meta verileri referans raster'dan kopyala
         out_meta = reference_raster.meta.copy()
         out_meta.update({
             'driver': 'GTiff',
-            'width': reference_raster.shape[1],
-            'height': reference_raster.shape[0],
+            'width': out_width,
+            'height': out_height,
             'count': output_band_count,
             'dtype': 'uint8',
-            'crs': reference_raster.crs,
-            'transform': reference_raster.transform,
+            'crs': out_crs,
+            'transform': out_transform,
             'compress': compress
         })
         
@@ -1076,6 +1197,17 @@ class ImageProcessor:
                 else:
                     data_out[i] = band_data.astype(np.uint8)
             data = data_out
+
+        # İstenirse referans grid boyutuna yeniden örnekle.
+        if (data.shape[1] != out_height) or (data.shape[2] != out_width):
+            logger.warning(
+                f"Çıktı boyutu için yeniden örnekleme yapılıyor: "
+                f"{data.shape[1]}x{data.shape[2]} -> {out_height}x{out_width}"
+            )
+            resized = np.zeros((data.shape[0], out_height, out_width), dtype=data.dtype)
+            for i in range(data.shape[0]):
+                resized[i] = cv2.resize(data[i], (out_width, out_height), interpolation=cv2.INTER_LINEAR)
+            data = resized
         
         # Yeni raster dosyasını yaz
         with rasterio.open(output_path, 'w', **out_meta) as dst:
@@ -1086,20 +1218,6 @@ class ImageProcessor:
                     dst.write_band(i + 1, data[i])
         
         logger.info(f"Jeoreferanslı görüntü kaydedildi: {output_path} ({output_band_count} band)")
-        
-        # İkinci aşama: GDAL Translate ile optimize et
-        if compress == 'JPEG' or compress == 'jpeg':
-            output_optimized = output_path.replace('.tif', '_optimized.tif')
-            logger.info(f"GDAL Translate ile optimize ediliyor: {output_optimized}")
-            
-            raster_gdal = gdal.Open(output_path)
-            if raster_gdal:
-                translate_options = gdal.TranslateOptions(
-                    format='GTiff',
-                    creationOptions=['TFW=NO', f'COMPRESS={compress.lower()}']
-                )
-                gdal.Translate(output_optimized, raster_gdal, options=translate_options)
-                logger.info(f"Optimize edilmiş dosya kaydedildi: {output_optimized}")
         
         input_raster.close()
         reference_raster.close()
@@ -1193,21 +1311,59 @@ class ImageProcessor:
         
         # Çıktı dizinini oluştur
         self.create_output_directory(output_dir)
+        # Eski inference dosyalari yeni merge sirasini bozmasin.
+        for old_name in os.listdir(output_dir):
+            old_path = os.path.join(output_dir, old_name)
+            if os.path.isfile(old_path) and old_name.lower().endswith(('.jpg', '.jpeg', '.png', '.tif', '.tiff')):
+                try:
+                    os.remove(old_path)
+                except Exception as e:
+                    logger.warning(f"Eski inference dosyasi silinemedi ({old_path}): {e}")
+
         
-        # Modeli yükle
-        logger.info(f"Model yükleniyor: {model_path}")
-        try:
-            model = load_model(model_path)
-        except Exception as e:
-            # Custom loss fonksiyonları için tekrar dene
+        # Modeli yukle (farkli Keras surumleri icin uyumluluk fallback'leri ile)
+        logger.info(f"Model yukleniyor: {model_path}")
+
+        def ssim_loss(y_true, y_pred):
+            return 1 - tf.reduce_mean(tf.image.ssim(y_true, y_pred, 1.0))
+
+        class CompatibleConv2DTranspose(tf.keras.layers.Conv2DTranspose):
+            """
+            Eski modellerde serialize edilen "groups" argumanini yoksayarak
+            yeni surumlerde modelin acilmasini saglar.
+            """
+            def __init__(self, *args, groups=1, **kwargs):
+                super().__init__(*args, **kwargs)
+
+        load_attempts = [
+            ("standart", {"compile": False}),
+            ("ssim_loss", {"custom_objects": {"ssim_loss": ssim_loss}, "compile": False}),
+            (
+                "ssim_loss + Conv2DTranspose uyumluluk",
+                {
+                    "custom_objects": {
+                        "ssim_loss": ssim_loss,
+                        "Conv2DTranspose": CompatibleConv2DTranspose,
+                    },
+                    "compile": False,
+                },
+            ),
+        ]
+
+        model = None
+        load_errors = []
+
+        for attempt_name, attempt_kwargs in load_attempts:
             try:
-                def ssim_loss(y_true, y_pred):
-                    return 1 - tf.reduce_mean(tf.image.ssim(y_true, y_pred, 1.0))
-                model = load_model(model_path, custom_objects={'ssim_loss': ssim_loss})
-            except:
-                raise ValueError(f"Model yüklenemedi: {e}")
-        
-        logger.info("Model yüklendi.")
+                model = load_model(model_path, **attempt_kwargs)
+                logger.info(f"Model yuklendi ({attempt_name}).")
+                break
+            except Exception as e:
+                load_errors.append(f"{attempt_name}: {e}")
+
+        if model is None:
+            detailed_error = "\n  - ".join(load_errors) if load_errors else "Bilinmeyen hata"
+            raise ValueError(f"Model yuklenemedi. Denenen yontemler:\n  - {detailed_error}")
         
         # ═══════════════════════════════════════════════════════════════════════
         # RENK MODU BELİRLEME
@@ -1429,66 +1585,32 @@ class ImageProcessor:
                             with open(metadata_path, 'r') as f:
                                 metadata = json.load(f)
                             logger.info("=" * 60)
-                            logger.info("1. ADIM: Görüntü Bölme (ATLANDI - Klasör zaten mevcut)")
+                            logger.info("1. ADIM: G?r?nt? B?lme (ATLANDI - Klas?r zaten mevcut)")
                             logger.info("=" * 60)
-                            logger.info(f"✓ Mevcut klasör bulundu: {split_output_dir_with_name}")
-                            logger.info(f"✓ {len(files_in_dir)} parça mevcut, bölme işlemi atlanıyor...")
-                            skip_split = True
-                            
-                            results['split'] = {
-                                'num_pieces': len(files_in_dir),
-                                'metadata': metadata,
-                                'output_dir': split_output_dir_with_name,
-                                'skipped': True
-                            }
+                            has_new_starts = ('x_starts' in metadata and 'y_starts' in metadata)
+                            if has_new_starts:
+                                logger.info(f"? Mevcut klas?r bulundu: {split_output_dir_with_name}")
+                                logger.info(f"? {len(files_in_dir)} par?a mevcut, b?lme i?lemi atlan?yor...")
+                                skip_split = True
+
+                                results['split'] = {
+                                    'num_pieces': len(files_in_dir),
+                                    'metadata': metadata,
+                                    'output_dir': split_output_dir_with_name,
+                                    'skipped': True
+                                }
+                            else:
+                                logger.warning(
+                                    "Mevcut metadata eski formatta (x_starts/y_starts yok). "
+                                    "Tam kapsama i?in b?lme ad?m? yeniden ?al??t?r?lacak."
+                                )
                         except Exception as e:
                             logger.warning(f"Metadata yüklenemedi, bölme işlemi tekrar yapılacak: {e}")
                     else:
-                        logger.info("=" * 60)
-                        logger.info("1. ADIM: Görüntü Bölme (ATLANDI - Klasör mevcut ama metadata yok)")
-                        logger.info("=" * 60)
-                        logger.info(f"✓ Mevcut klasör bulundu: {split_output_dir_with_name}")
-                        logger.info(f"✓ {len(files_in_dir)} parça mevcut, bölme işlemi atlanıyor...")
-                        skip_split = True
+                        logger.warning(
+                            "Metadata dosyasi bulunamadi. Tam kapsama icin bolme adimi yeniden calistirilacak."
+                        )
                         
-                        # Metadata olmadan devam et, parça sayılarını tahmin et
-                        # Dosya adlarından çıkarmaya çalış (goruntu_i_j.jpg formatından)
-                        max_i, max_j = 0, 0
-                        for f in files_in_dir:
-                            try:
-                                parts = f.split('_')
-                                if len(parts) >= 3:
-                                    i = int(parts[-2])
-                                    j = int(parts[-1].split('.')[0])
-                                    max_i = max(max_i, i)
-                                    max_j = max(max_j, j)
-                            except:
-                                continue
-                        
-                        if max_i > 0 or max_j > 0:
-                            num_frames_x = max_i + 1
-                            num_frames_y = max_j + 1
-                        else:
-                            # Kare kök tahmini
-                            sqrt_val = int(np.sqrt(len(files_in_dir)))
-                            num_frames_x = sqrt_val
-                            num_frames_y = sqrt_val
-                        
-                        metadata = {
-                            'num_frames_x': num_frames_x,
-                            'num_frames_y': num_frames_y,
-                            'frame_size': split_frame_size,
-                            'overlap': split_overlap,
-                            'original_size': None,
-                            'original_path': input_image
-                        }
-                        
-                        results['split'] = {
-                            'num_pieces': len(files_in_dir),
-                            'metadata': metadata,
-                            'output_dir': split_output_dir_with_name,
-                            'skipped': True
-                        }
             
             if not skip_split:
                 logger.info("=" * 60)
@@ -1496,6 +1618,19 @@ class ImageProcessor:
                 logger.info("=" * 60)
                 
                 img = self.load_image(input_image)
+                # Eski/yarim kalan parcalarin yeni split sonucunu bozmamasi icin temizle.
+                if os.path.exists(split_output_dir_with_name):
+                    for old_name in os.listdir(split_output_dir_with_name):
+                        old_path = os.path.join(split_output_dir_with_name, old_name)
+                        if os.path.isfile(old_path) and (
+                            old_name.lower().endswith(('.jpg', '.jpeg', '.png', '.tif', '.tiff'))
+                            or old_name == 'metadata.json'
+                        ):
+                            try:
+                                os.remove(old_path)
+                            except Exception as e:
+                                logger.warning(f"Eski parca dosyasi silinemedi ({old_path}): {e}")
+
                 
                 # Coğrafi bilgileri al (eğer mümkünse)
                 try:
@@ -1684,6 +1819,29 @@ class ImageProcessor:
             logger.info("=" * 60)
             logger.info("4. ADIM: Jeoreferanslama")
             logger.info("=" * 60)
+
+            # Mümkünse georeferans için split metadata'daki orijinal geotransform'u kullan.
+            pipeline_transform = None
+            pipeline_crs = None
+            metadata_geotransform = metadata.get('geotransform') if isinstance(metadata, dict) else None
+            if metadata_geotransform and len(metadata_geotransform) == 6:
+                try:
+                    gt_vals = tuple(float(v) for v in metadata_geotransform)
+                    pipeline_transform = Affine.from_gdal(*gt_vals)
+                    logger.info("Jeoreferanslama için metadata geotransform'u kullanılacak.")
+                except Exception as e:
+                    logger.warning(f"Metadata geotransform'u parse edilemedi, referans transform kullanılacak: {e}")
+
+            try:
+                with rasterio.open(input_image) as src_raster:
+                    if pipeline_transform is None:
+                        pipeline_transform = src_raster.transform
+                        logger.info("Jeoreferanslama icin kaynak transform kullanilacak.")
+                    pipeline_crs = src_raster.crs
+                    if pipeline_crs:
+                        logger.info(f"Jeoreferanslama icin kaynak CRS kullanilacak: {pipeline_crs}")
+            except Exception as e:
+                logger.warning(f"Kaynak transform/CRS okunamadi, referans bilgileri kullanilacak: {e}")
             
             # Referans raster'ı bul (görüntü adına göre)
             selected_reference = None
@@ -1734,6 +1892,9 @@ class ImageProcessor:
                             band=CONFIG["georef"]["band"],
                             compress=CONFIG["georef"]["compress"],
                             nodata=CONFIG["georef"]["nodata"],
+                            target_transform=pipeline_transform,
+                            target_crs=pipeline_crs,
+                            force_reference_shape=False,
                         )
                         
                         results['georef'].append({

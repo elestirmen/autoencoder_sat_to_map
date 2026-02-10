@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """
 Birleşik AutoEncoder Eğitim Scripti
 ===================================
@@ -22,8 +23,8 @@ from tensorflow.keras.preprocessing.image import load_img, img_to_array
 from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
 from tensorflow.keras.models import Model, load_model
 from tensorflow.keras.layers import (
-    Conv2D, Conv2DTranspose, Input, UpSampling2D, 
-    MaxPooling2D, Dropout, BatchNormalization
+    Conv2D, Conv2DTranspose, Input, UpSampling2D,
+    MaxPooling2D, Dropout, BatchNormalization, Concatenate, Add, Activation
 )
 from tensorflow.keras import regularizers
 from tensorflow.keras import backend as K
@@ -46,7 +47,7 @@ class Config:
     
     # ------------------------------ VERİ AYARLARI -----------------------------
     # Veri dizini yolu
-    DATA_DIR = "maps_zoom_level_19\sonuclar_19"
+    DATA_DIR = "maps_zoom_level_19/sonuclar_19/"
     
     # Renk modu: "grayscale", "rgb", "grayscale_with_equalize"
     COLOR_MODE = "rgb"
@@ -74,16 +75,16 @@ class Config:
     # Multi-scale için boyut listesi (MULTI_SCALE_TRAINING=True ise kullanılır)
     MULTI_SCALE_SIZES = [256, 384, 448, 512, 544]
     
-    # Model mimarisi seçimi:
-    # "autoencoder", "autoencoder_backup", "upsampled", "advanced", 
-    # "gpt", "gpt_no_reg", "deneysel", "classic"
-    MODEL_TYPE = "advanced"
+    # Model mimarisi secimi:
+    # "unet_residual", "autoencoder", "autoencoder_backup", "upsampled",
+    # "advanced", "gpt", "gpt_no_reg", "deneysel", "classic"
+    MODEL_TYPE = "unet_residual"
     
     # Önceden eğitilmiş model yükle (None = sıfırdan başla)
     PRETRAINED_MODEL = None  # Örn: "son_model.h5" veya None
     
     # Aktivasyon fonksiyonu: "sigmoid", "relu", "elu", "tanh"
-    ACTIVATION_FUNC = "sigmoid"
+    ACTIVATION_FUNC = "tanh"
     
     # Filtre sayısı (başlangıç filtre sayısı)
     FILTER_COUNT = 32
@@ -107,8 +108,8 @@ class Config:
     # Optimizer: "adam", "sgd", "rmsprop"
     OPTIMIZER = "adam"
     
-    # Loss fonksiyonu: "mse", "mae", "binary_crossentropy", "ssim"
-    LOSS_FUNCTION = "mse"
+    # Loss fonksiyonu: "hybrid", "mse", "mae", "binary_crossentropy", "ssim"
+    LOSS_FUNCTION = "hybrid"
     
     # ------------------------------ KAYIT AYARLARI ----------------------------
     # Model kayıt dizini (None = mevcut dizin)
@@ -139,13 +140,13 @@ class Config:
     
     # Cache dosyası adı (VALIDATE_FILES="cached" için)
     VALIDATION_CACHE_FILE = "valid_files_cache.json"
-    
+
     # ------------------------------ GELİŞMİŞ AYARLAR --------------------------
     # Early stopping (0 = devre dışı)
-    EARLY_STOPPING_PATIENCE = 0
+    EARLY_STOPPING_PATIENCE = 8
     
     # Learning rate azaltma (0 = devre dışı)
-    REDUCE_LR_PATIENCE = 0
+    REDUCE_LR_PATIENCE = 4
     REDUCE_LR_FACTOR = 0.5
     
     # Dropout oranı (bazı modeller için)
@@ -187,14 +188,38 @@ def get_input_shape(for_inference=False):
 # ==============================================================================
 
 def ssim_loss(y_true, y_pred):
-    """SSIM tabanlı kayıp fonksiyonu."""
-    return 1 - tf.reduce_mean(tf.image.ssim(y_true, y_pred, 1.0))
+    """SSIM tabanli kayip fonksiyonu."""
+    y_true = tf.clip_by_value(y_true, -1.0, 1.0)
+    y_pred = tf.clip_by_value(y_pred, -1.0, 1.0)
+    return 1 - tf.reduce_mean(tf.image.ssim(y_true, y_pred, 2.0))
 
+
+def hybrid_loss(y_true, y_pred):
+    """L1 + SSIM karisik kayip (daha net cizgiler icin)."""
+    y_true = tf.clip_by_value(y_true, -1.0, 1.0)
+    y_pred = tf.clip_by_value(y_pred, -1.0, 1.0)
+    l1 = tf.reduce_mean(tf.abs(y_true - y_pred))
+    ssim = 1 - tf.reduce_mean(tf.image.ssim(y_true, y_pred, 2.0))
+    return 0.8 * l1 + 0.2 * ssim
+
+
+def ssim_metric(y_true, y_pred):
+    """Takip metrigi: SSIM (1'e yaklastikca daha iyi)."""
+    y_true = tf.clip_by_value(y_true, -1.0, 1.0)
+    y_pred = tf.clip_by_value(y_pred, -1.0, 1.0)
+    return tf.reduce_mean(tf.image.ssim(y_true, y_pred, 2.0))
+
+
+def get_metrics():
+    """Egitim metrikleri."""
+    return [tf.keras.metrics.MeanAbsoluteError(name='mae'), ssim_metric]
 
 def get_loss_function():
     """Yapılandırmaya göre kayıp fonksiyonunu döndürür."""
     if Config.LOSS_FUNCTION == "ssim":
         return ssim_loss
+    elif Config.LOSS_FUNCTION == "hybrid":
+        return hybrid_loss
     elif Config.LOSS_FUNCTION == "mse":
         return "mse"
     elif Config.LOSS_FUNCTION == "mae":
@@ -243,36 +268,36 @@ def load_and_preprocess(image_path):
     """Görüntüyü yükler ve ön işler."""
     channels = get_channels()
     use_equalize = Config.COLOR_MODE == "grayscale_with_equalize"
-    
+
     # Dosyayı oku ve decode et
     img_raw = tf.io.read_file(image_path)
     img = tf.image.decode_image(img_raw, channels=channels)
-    
+
     # Veri tipini float32'ye çevir
     img = tf.cast(img, tf.float32)
-    
+
     # Boyutları al
     shape = tf.shape(img)
     height = shape[0]
     width = shape[1] // 2  # Girdi ve etiket yan yana
-    
+
     # Girdi ve etiketi ayır
     input_img = tf.slice(img, [0, 0, 0], [height, width, channels])
     label_img = tf.slice(img, [0, width, 0], [height, width, channels])
-    
+
     # Histogram eşitleme (sadece grayscale_with_equalize modunda)
     if use_equalize and TFA_AVAILABLE:
         input_img = tfa.image.equalize(input_img)
-    
+
     # Boyutlandırma
     target_size = Config.IMAGE_SIZE
     input_img = tf.image.resize(input_img, [target_size, target_size], method=tf.image.ResizeMethod.NEAREST_NEIGHBOR)
     label_img = tf.image.resize(label_img, [target_size, target_size], method=tf.image.ResizeMethod.NEAREST_NEIGHBOR)
-    
+
     # Normalizasyon (-1 ile 1 arası)
     input_img = (input_img - 127.5) / 127.5
     label_img = (label_img - 127.5) / 127.5
-    
+
     return (input_img, label_img)
 
 
@@ -280,34 +305,34 @@ def load_and_preprocess_multiscale(image_path):
     """Multi-scale eğitim için görüntüyü rastgele boyutta yükler."""
     channels = get_channels()
     use_equalize = Config.COLOR_MODE == "grayscale_with_equalize"
-    
+
     # Dosyayı oku ve decode et
     img_raw = tf.io.read_file(image_path)
     img = tf.image.decode_image(img_raw, channels=channels)
     img = tf.cast(img, tf.float32)
-    
+
     # Boyutları al
     shape = tf.shape(img)
     height = shape[0]
     width = shape[1] // 2
-    
+
     # Girdi ve etiketi ayır
     input_img = tf.slice(img, [0, 0, 0], [height, width, channels])
     label_img = tf.slice(img, [0, width, 0], [height, width, channels])
-    
+
     # Histogram eşitleme
     if use_equalize and TFA_AVAILABLE:
         input_img = tfa.image.equalize(input_img)
-    
+
     # Rastgele boyut seç
     target_size = get_random_size()
     input_img = tf.image.resize(input_img, [target_size, target_size], method=tf.image.ResizeMethod.NEAREST_NEIGHBOR)
     label_img = tf.image.resize(label_img, [target_size, target_size], method=tf.image.ResizeMethod.NEAREST_NEIGHBOR)
-    
+
     # Normalizasyon
     input_img = (input_img - 127.5) / 127.5
     label_img = (label_img - 127.5) / 127.5
-    
+
     return (input_img, label_img)
 
 
@@ -582,157 +607,214 @@ def create_autoencoder_model_backup(input_shape):
 
 
 def create_upsampled_autoencoder(input_shape):
-    """UpSampling tabanlı autoencoder."""
+    """UpSampling tabanli simetrik autoencoder (giris/cikis boyutu esit)."""
     channels = input_shape[-1]
     filter_count = Config.FILTER_COUNT
     kernel_size = Config.KERNEL_SIZE
-    strides = Config.STRIDES
-    
+    activation_func = Config.ACTIVATION_FUNC
+
     input_layer = Input(shape=input_shape)
-    
+
     # Encoder
-    x = Conv2D(filter_count, kernel_size=kernel_size, strides=strides,
-               activation='elu', padding='same', kernel_initializer='he_normal')(input_layer)
-    x = Conv2D(filter_count // 2, kernel_size=kernel_size, strides=strides,
-               activation='elu', padding='same', kernel_initializer='he_normal')(x)
-    x = Conv2D(filter_count // 4, kernel_size=kernel_size, strides=strides,
-               activation='elu', padding='same', kernel_initializer='he_normal')(x)
-    x = Conv2D(filter_count // 8, kernel_size=(2, 2), strides=(1, 1),
-               activation='elu', padding='same', kernel_initializer='he_normal')(x)
-    
+    x = Conv2D(filter_count, kernel_size=kernel_size, activation='elu',
+               padding='same', kernel_initializer='he_normal')(input_layer)
+    x = MaxPooling2D((2, 2), padding='same')(x)
+
+    x = Conv2D(filter_count * 2, kernel_size=kernel_size, activation='elu',
+               padding='same', kernel_initializer='he_normal')(x)
+    x = MaxPooling2D((2, 2), padding='same')(x)
+
+    x = Conv2D(filter_count * 4, kernel_size=(3, 3), activation='elu',
+               padding='same', kernel_initializer='he_normal')(x)
+
     # Decoder
     x = UpSampling2D(size=(2, 2))(x)
-    x = Conv2D(filter_count // 4, kernel_size=kernel_size, strides=(1, 1),
-               activation='elu', padding='same', kernel_initializer='he_normal')(x)
-    
+    x = Conv2D(filter_count * 2, kernel_size=kernel_size, activation='elu',
+               padding='same', kernel_initializer='he_normal')(x)
+
     x = UpSampling2D(size=(2, 2))(x)
-    x = Conv2D(filter_count // 2, kernel_size=kernel_size, strides=(1, 1),
-               activation='elu', padding='same', kernel_initializer='he_normal')(x)
-    
-    x = UpSampling2D(size=(2, 2))(x)
-    output_layer = Conv2D(channels, kernel_size=kernel_size, strides=(1, 1),
-                          activation='elu', padding='same', kernel_initializer='he_normal')(x)
-    
+    x = Conv2D(filter_count, kernel_size=kernel_size, activation='elu',
+               padding='same', kernel_initializer='he_normal')(x)
+
+    output_layer = Conv2D(channels, kernel_size=(1, 1), activation=activation_func, padding='same')(x)
     return Model(inputs=input_layer, outputs=output_layer)
 
-
 def create_advanced_autoencoder(input_shape):
-    """Gelişmiş autoencoder (MaxPooling + Dropout)."""
+    """Gelismis autoencoder (MaxPooling + Dropout)."""
     channels = input_shape[-1]
     filter_count = Config.FILTER_COUNT
     kernel_size = Config.KERNEL_SIZE
     strides = Config.STRIDES
     activation_func = Config.ACTIVATION_FUNC
     dropout_rate = Config.DROPOUT_RATE
-    
+
     input_layer = Input(shape=input_shape)
-    
+
     # Encoder
     x = Conv2D(filter_count // 2, kernel_size=kernel_size, strides=strides,
-               activation=activation_func, padding='same')(input_layer)
+               activation='elu', padding='same')(input_layer)
     x = MaxPooling2D((2, 2), padding='same')(x)
     x = Dropout(dropout_rate)(x)
-    
+
     x = Conv2D(filter_count, kernel_size=kernel_size, strides=strides,
-               activation=activation_func, padding='same')(x)
+               activation='elu', padding='same')(x)
     x = MaxPooling2D((2, 2), padding='same')(x)
-    
+
     x = Conv2D(filter_count * 2, kernel_size=kernel_size, strides=strides,
-               activation=activation_func, padding='same')(x)
-    
+               activation='elu', padding='same')(x)
+
     # Decoder
     x = Conv2DTranspose(filter_count * 2, kernel_size=kernel_size, strides=strides,
-                        activation=activation_func, padding='same')(x)
+                        activation='elu', padding='same')(x)
     x = UpSampling2D((2, 2))(x)
     x = Dropout(dropout_rate)(x)
-    
+
     x = Conv2DTranspose(filter_count, kernel_size=kernel_size, strides=strides,
-                        activation=activation_func, padding='same')(x)
+                        activation='elu', padding='same')(x)
     x = UpSampling2D((2, 2))(x)
     x = Dropout(dropout_rate)(x)
-    
+
     x = Conv2DTranspose(filter_count // 2, kernel_size=kernel_size, strides=(1, 1),
-                        activation=activation_func, padding='same')(x)
-    
+                        activation='elu', padding='same')(x)
+
     output_layer = Conv2DTranspose(channels, kernel_size=kernel_size, strides=strides,
                                    activation=activation_func, padding='same')(x)
-    
+
     return Model(inputs=input_layer, outputs=output_layer)
 
 
+def residual_block(x, filters, dropout_rate=0.0):
+    """Residual block: gradient akis guclendirme + detay koruma."""
+    shortcut = x
+    if x.shape[-1] != filters:
+        shortcut = Conv2D(filters, (1, 1), padding='same', kernel_initializer='he_normal')(shortcut)
+
+    y = Conv2D(filters, (3, 3), padding='same', kernel_initializer='he_normal')(x)
+    y = BatchNormalization()(y)
+    y = Activation('elu')(y)
+
+    y = Conv2D(filters, (3, 3), padding='same', kernel_initializer='he_normal')(y)
+    y = BatchNormalization()(y)
+
+    if dropout_rate > 0:
+        y = Dropout(dropout_rate)(y)
+
+    y = Add()([shortcut, y])
+    y = Activation('elu')(y)
+    return y
+
+
+def create_unet_residual_model(input_shape):
+    """Uydu -> harita stil cevirimi icin oncelikli model (U-Net + residual skip)."""
+    channels = input_shape[-1]
+    base_filters = max(16, int(Config.FILTER_COUNT))
+    dropout_rate = Config.DROPOUT_RATE
+    activation_func = Config.ACTIVATION_FUNC
+
+    input_layer = Input(shape=input_shape)
+
+    # Encoder path
+    e1 = residual_block(input_layer, base_filters)
+    d1 = Conv2D(base_filters, (3, 3), strides=(2, 2), padding='same', kernel_initializer='he_normal')(e1)
+
+    e2 = residual_block(d1, base_filters * 2)
+    d2 = Conv2D(base_filters * 2, (3, 3), strides=(2, 2), padding='same', kernel_initializer='he_normal')(e2)
+
+    e3 = residual_block(d2, base_filters * 4, dropout_rate=dropout_rate * 0.5)
+    d3 = Conv2D(base_filters * 4, (3, 3), strides=(2, 2), padding='same', kernel_initializer='he_normal')(e3)
+
+    bottleneck = residual_block(d3, base_filters * 8, dropout_rate=dropout_rate)
+
+    # Decoder path with skip connections
+    u3 = Conv2DTranspose(base_filters * 4, (3, 3), strides=(2, 2), padding='same', kernel_initializer='he_normal')(bottleneck)
+    u3 = Concatenate()([u3, e3])
+    u3 = residual_block(u3, base_filters * 4, dropout_rate=dropout_rate * 0.5)
+
+    u2 = Conv2DTranspose(base_filters * 2, (3, 3), strides=(2, 2), padding='same', kernel_initializer='he_normal')(u3)
+    u2 = Concatenate()([u2, e2])
+    u2 = residual_block(u2, base_filters * 2)
+
+    u1 = Conv2DTranspose(base_filters, (3, 3), strides=(2, 2), padding='same', kernel_initializer='he_normal')(u2)
+    u1 = Concatenate()([u1, e1])
+    u1 = residual_block(u1, base_filters)
+
+    output_layer = Conv2D(channels, (1, 1), activation=activation_func, padding='same')(u1)
+    return Model(inputs=input_layer, outputs=output_layer)
+
 def create_gpt_autoencoder(input_shape):
-    """GPT tarzı autoencoder (L1 regularization ile)."""
+    """GPT tarzi autoencoder (L1 regularization ile)."""
     channels = input_shape[-1]
     filter_count = Config.FILTER_COUNT
     kernel_size = Config.KERNEL_SIZE
     l1_reg = Config.L1_REGULARIZATION
-    
+    activation_func = Config.ACTIVATION_FUNC
+    half_filters = max(1, filter_count // 2)
+
     input_layer = Input(shape=input_shape)
-    
+
     # Encoder
-    x = Conv2D(filter_count / 2, kernel_size, activation='elu', padding='same',
+    x = Conv2D(half_filters, kernel_size, activation='elu', padding='same',
                activity_regularizer=regularizers.l1(l1_reg))(input_layer)
     x = MaxPooling2D((2, 2), padding='same')(x)
     x = Dropout(0.4)(x)
-    
+
     x = Conv2D(filter_count, kernel_size, activation='elu', padding='same',
                activity_regularizer=regularizers.l1(l1_reg))(x)
     x = MaxPooling2D((2, 2), padding='same')(x)
     x = Dropout(0.4)(x)
-    
+
     x = Conv2D(filter_count * 2, kernel_size, activation='elu', padding='same',
                activity_regularizer=regularizers.l1(l1_reg))(x)
     x = MaxPooling2D((2, 2), padding='same')(x)
     x = Dropout(0.4)(x)
-    
+
     # Decoder
     x = Conv2DTranspose(filter_count * 2, kernel_size, activation='elu', padding='same')(x)
     x = UpSampling2D((2, 2))(x)
     x = Dropout(0.4)(x)
-    
+
     x = Conv2DTranspose(filter_count, kernel_size, activation='elu', padding='same')(x)
     x = UpSampling2D((2, 2))(x)
     x = Dropout(0.4)(x)
-    
-    x = Conv2DTranspose(filter_count / 2, kernel_size, activation='elu', padding='same')(x)
+
+    x = Conv2DTranspose(half_filters, kernel_size, activation='elu', padding='same')(x)
     x = UpSampling2D((2, 2))(x)
     x = Dropout(0.4)(x)
-    
-    output_layer = Conv2DTranspose(channels, kernel_size, activation='sigmoid', padding='same')(x)
-    
+
+    output_layer = Conv2DTranspose(channels, kernel_size, activation=activation_func, padding='same')(x)
+
     return Model(inputs=input_layer, outputs=output_layer)
 
-
 def create_gpt_autoencoder_no_reg(input_shape):
-    """GPT tarzı autoencoder (regularization olmadan)."""
+    """GPT tarzi autoencoder (regularization olmadan)."""
     channels = input_shape[-1]
     filter_count = Config.FILTER_COUNT
     kernel_size = Config.KERNEL_SIZE
-    
+    activation_func = Config.ACTIVATION_FUNC
+
     input_layer = Input(shape=input_shape)
-    
+
     # Encoder
     x = Conv2D(filter_count, kernel_size, activation='elu', padding='same')(input_layer)
     x = MaxPooling2D((2, 2), padding='same')(x)
     x = Dropout(0.4)(x)
-    
+
     x = Conv2D(filter_count * 2, kernel_size, activation='elu', padding='same')(x)
     x = MaxPooling2D((2, 2), padding='same')(x)
     x = Dropout(0.4)(x)
-    
+
     # Decoder
     x = Conv2DTranspose(filter_count * 2, kernel_size, activation='elu', padding='same')(x)
     x = UpSampling2D((2, 2))(x)
     x = Dropout(0.4)(x)
-    
+
     x = Conv2DTranspose(filter_count, kernel_size, activation='elu', padding='same')(x)
     x = UpSampling2D((2, 2))(x)
     x = Dropout(0.4)(x)
-    
-    output_layer = Conv2DTranspose(channels, kernel_size, activation='sigmoid', padding='same')(x)
-    
-    return Model(inputs=input_layer, outputs=output_layer)
 
+    output_layer = Conv2DTranspose(channels, kernel_size, activation=activation_func, padding='same')(x)
+
+    return Model(inputs=input_layer, outputs=output_layer)
 
 def create_deneysel_model(input_shape):
     """Deneysel model (basit ve hızlı)."""
@@ -796,13 +878,21 @@ def get_model(input_shape):
     if Config.PRETRAINED_MODEL is not None:
         if os.path.exists(Config.PRETRAINED_MODEL):
             print(f"Önceden eğitilmiş model yükleniyor: {Config.PRETRAINED_MODEL}")
-            return load_model(Config.PRETRAINED_MODEL, custom_objects={'ssim_loss': ssim_loss})
+            return load_model(
+                Config.PRETRAINED_MODEL,
+                custom_objects={
+                    'ssim_loss': ssim_loss,
+                    'hybrid_loss': hybrid_loss,
+                    'ssim_metric': ssim_metric
+                }
+            )
         else:
             print(f"UYARI: Model dosyası bulunamadı: {Config.PRETRAINED_MODEL}")
             print("Sıfırdan model oluşturuluyor...")
     
     # Model tipine göre oluştur
     model_builders = {
+        "unet_residual": create_unet_residual_model,
         "autoencoder": create_autoencoder_model,
         "autoencoder_backup": create_autoencoder_model_backup,
         "upsampled": create_upsampled_autoencoder,
@@ -820,6 +910,27 @@ def get_model(input_shape):
     
     print(f"Model oluşturuluyor: {Config.MODEL_TYPE}")
     return model_builders[model_type](input_shape)
+
+
+def validate_model_output_shape(model, input_shape):
+    """Modelin cikis seklinin giris ile uyumlu oldugunu dogrular."""
+    output_shape = model.output_shape
+    expected_channels = get_channels()
+
+    if output_shape[-1] != expected_channels:
+        raise ValueError(
+            f"Model cikis kanali uyusmuyor. Beklenen={expected_channels}, bulunan={output_shape[-1]}"
+        )
+
+    if input_shape[0] is not None and output_shape[1] is not None and input_shape[0] != output_shape[1]:
+        raise ValueError(
+            f"Model cikis yuksekligi uyusmuyor. Beklenen={input_shape[0]}, bulunan={output_shape[1]}"
+        )
+
+    if input_shape[1] is not None and output_shape[2] is not None and input_shape[1] != output_shape[2]:
+        raise ValueError(
+            f"Model cikis genisligi uyusmuyor. Beklenen={input_shape[1]}, bulunan={output_shape[2]}"
+        )
 
 
 # ==============================================================================
@@ -945,12 +1056,13 @@ def main():
     print(f"Giriş boyutu: {input_shape}")
     
     model = get_model(input_shape)
-    
+    validate_model_output_shape(model, input_shape)
+
     # Model derle
     optimizer = get_optimizer()
     loss_fn = get_loss_function()
     
-    model.compile(optimizer=optimizer, loss=loss_fn, metrics=['accuracy'])
+    model.compile(optimizer=optimizer, loss=loss_fn, metrics=get_metrics())
     
     # Modelin özetini yazdır
     model.summary()
@@ -987,3 +1099,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
