@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 Birleşik AutoEncoder Eğitim Scripti
 ===================================
@@ -24,7 +24,7 @@ from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLRO
 from tensorflow.keras.models import Model, load_model
 from tensorflow.keras.layers import (
     Conv2D, Conv2DTranspose, Input, UpSampling2D,
-    MaxPooling2D, Dropout, BatchNormalization, Concatenate, Add, Activation
+    MaxPooling2D, Dropout, BatchNormalization, Concatenate, Add, Activation, Lambda
 )
 from tensorflow.keras import regularizers
 from tensorflow.keras import backend as K
@@ -50,10 +50,10 @@ class Config:
     DATA_DIR = "maps_zoom_level_19/sonuclar_19/"
     
     # Giris renk modu: "grayscale", "rgb", "grayscale_with_equalize"
-    COLOR_MODE = "rgb"
+    COLOR_MODE = "grayscale"
 
     # Cikis renk modu: "auto" (giris ile ayni), "grayscale", "rgb"
-    OUTPUT_COLOR_MODE = "auto"
+    OUTPUT_COLOR_MODE = "grayscale"
     
     # Eğitim/Doğrulama oranı (0.0 - 1.0 arası, eğitim için kullanılacak oran)
     TRAIN_SPLIT = 0.9
@@ -81,13 +81,13 @@ class Config:
     # Model mimarisi secimi:
     # "unet_residual", "autoencoder", "autoencoder_backup", "upsampled",
     # "advanced", "gpt", "gpt_no_reg", "deneysel", "classic"
-    MODEL_TYPE = "unet_residual"
+    MODEL_TYPE = "classic"
     
     # Önceden eğitilmiş model yükle (None = sıfırdan başla)
     PRETRAINED_MODEL = None  # Örn: "son_model.h5" veya None
     
     # Aktivasyon fonksiyonu: "sigmoid", "relu", "elu", "tanh"
-    ACTIVATION_FUNC = "tanh"
+    ACTIVATION_FUNC = "elu"
     
     # Filtre sayısı (başlangıç filtre sayısı)
     FILTER_COUNT = 32
@@ -822,6 +822,34 @@ def residual_block(x, filters, dropout_rate=0.0):
     return y
 
 
+def conv_bn_elu(x, filters, kernel_size=(3, 3), dropout_rate=0.0):
+    """Conv + BN + ELU blogu."""
+    y = Conv2D(
+        filters,
+        kernel_size,
+        padding='same',
+        use_bias=False,
+        kernel_initializer='he_normal'
+    )(x)
+    y = BatchNormalization()(y)
+    y = Activation('elu')(y)
+    if dropout_rate > 0:
+        y = Dropout(dropout_rate)(y)
+    return y
+
+
+def align_spatial_to(source_tensor, reference_tensor, name):
+    """Kaynak tensörü referansın uzamsal boyutlarına hizalar."""
+    return Lambda(
+        lambda tensors: tf.image.resize_with_crop_or_pad(
+            tensors[0],
+            tf.shape(tensors[1])[1],
+            tf.shape(tensors[1])[2]
+        ),
+        name=name
+    )([source_tensor, reference_tensor])
+
+
 def create_unet_residual_model(input_shape):
     """Uydu -> harita stil cevirimi icin oncelikli model (U-Net + residual skip)."""
     channels = get_output_channels()
@@ -960,32 +988,116 @@ def create_deneysel_model(input_shape):
 
 
 def create_classic_model(input_shape):
-    """Klasik autoencoder modeli."""
+    """Iyilestirilmis klasik autoencoder (bottleneck + skip connection + BN)."""
     channels = get_output_channels()
-    filter_count = Config.FILTER_COUNT
+    base_filters = max(16, int(Config.FILTER_COUNT))
     kernel_size = Config.KERNEL_SIZE
     activation_func = Config.ACTIVATION_FUNC
-    dropout_rate = Config.DROPOUT_RATE
-    
+    dropout_rate = float(np.clip(Config.DROPOUT_RATE, 0.0, 0.6))
+
     input_layer = Input(shape=input_shape)
-    
-    x = Conv2D(filter_count * 16, kernel_size=kernel_size, strides=(1, 1),
-               activation='elu', padding='same', kernel_initializer='he_normal')(input_layer)
-    x = Dropout(dropout_rate)(x)
-    x = Conv2D(filter_count * 8, kernel_size=kernel_size, strides=(1, 1),
-               activation='elu', padding='same', kernel_initializer='he_normal')(x)
-    x = Dropout(dropout_rate)(x)
-    
-    x = Conv2DTranspose(filter_count * 8, kernel_size=kernel_size, strides=(1, 1),
-                        activation='elu', padding='same', kernel_initializer='he_normal')(x)
-    x = Dropout(dropout_rate)(x)
-    x = Conv2DTranspose(filter_count * 16, kernel_size=kernel_size, strides=(1, 1),
-                        activation='elu', padding='same', kernel_initializer='he_normal')(x)
-    x = Dropout(dropout_rate)(x)
-    
-    output_layer = Conv2D(channels, kernel_size=kernel_size, strides=(1, 1),
-                          activation=activation_func, padding='same')(x)
-    
+
+    # Encoder
+    x = conv_bn_elu(input_layer, base_filters, kernel_size=kernel_size)
+    skip1 = conv_bn_elu(
+        x,
+        base_filters,
+        kernel_size=kernel_size,
+        dropout_rate=dropout_rate * 0.25
+    )
+
+    x = Conv2D(
+        base_filters * 2,
+        kernel_size=kernel_size,
+        strides=(2, 2),
+        padding='same',
+        use_bias=False,
+        kernel_initializer='he_normal'
+    )(skip1)
+    x = BatchNormalization()(x)
+    x = Activation('elu')(x)
+    skip2 = conv_bn_elu(
+        x,
+        base_filters * 2,
+        kernel_size=kernel_size,
+        dropout_rate=dropout_rate * 0.5
+    )
+
+    x = Conv2D(
+        base_filters * 4,
+        kernel_size=kernel_size,
+        strides=(2, 2),
+        padding='same',
+        use_bias=False,
+        kernel_initializer='he_normal'
+    )(skip2)
+    x = BatchNormalization()(x)
+    x = Activation('elu')(x)
+    x = conv_bn_elu(
+        x,
+        base_filters * 4,
+        kernel_size=kernel_size,
+        dropout_rate=dropout_rate
+    )
+    x = conv_bn_elu(
+        x,
+        base_filters * 4,
+        kernel_size=kernel_size,
+        dropout_rate=dropout_rate * 0.5
+    )
+
+    # Decoder
+    x = Conv2DTranspose(
+        base_filters * 2,
+        kernel_size=kernel_size,
+        strides=(2, 2),
+        padding='same',
+        use_bias=False,
+        kernel_initializer='he_normal'
+    )(x)
+    x = BatchNormalization()(x)
+    x = Activation('elu')(x)
+    x = align_spatial_to(x, skip2, name='classic_align_skip2')
+    x = Concatenate()([x, skip2])
+    x = conv_bn_elu(
+        x,
+        base_filters * 2,
+        kernel_size=kernel_size,
+        dropout_rate=dropout_rate * 0.5
+    )
+
+    x = Conv2DTranspose(
+        base_filters,
+        kernel_size=kernel_size,
+        strides=(2, 2),
+        padding='same',
+        use_bias=False,
+        kernel_initializer='he_normal'
+    )(x)
+    x = BatchNormalization()(x)
+    x = Activation('elu')(x)
+    x = align_spatial_to(x, skip1, name='classic_align_skip1')
+    x = Concatenate()([x, skip1])
+    x = conv_bn_elu(
+        x,
+        base_filters,
+        kernel_size=kernel_size,
+        dropout_rate=dropout_rate * 0.25
+    )
+    x = conv_bn_elu(x, base_filters, kernel_size=kernel_size)
+
+    logits = Conv2D(
+        channels,
+        kernel_size=(1, 1),
+        strides=(1, 1),
+        padding='same',
+        kernel_initializer='he_normal'
+    )(x)
+
+    # Dinamik giriste tek/çift boyut farklarinda cikisi girisle hizala.
+    logits = align_spatial_to(logits, input_layer, name='classic_output_align')
+
+    output_layer = Activation(activation_func)(logits)
     return Model(inputs=input_layer, outputs=output_layer)
 
 

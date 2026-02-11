@@ -350,7 +350,6 @@ logger = logging.getLogger(__name__)
 try:
     import tensorflow as tf
     from tensorflow.keras.models import load_model
-    from tensorflow.keras.preprocessing.image import img_to_array, load_img
     TENSORFLOW_AVAILABLE = True
 except ImportError:
     TENSORFLOW_AVAILABLE = False
@@ -1423,7 +1422,27 @@ class ImageProcessor:
         
         logger.info(f"{len(files)} dosya bulundu, batch inference başlatılıyor (batch_size={batch_size})...")
         
-        channels = 1 if color_mode == "grayscale" else 3
+        model_input_channels = None
+        model_output_channels = None
+        try:
+            model_input_channels = model.input_shape[-1]
+            model_output_channels = model.output_shape[-1]
+        except Exception:
+            pass
+
+        if model_input_channels in (1, 3):
+            channels = int(model_input_channels)
+            if color_mode != "auto":
+                requested_channels = 1 if color_mode == "grayscale" else 3
+                if requested_channels != channels:
+                    logger.warning(
+                        f"İstenen color_mode ('{color_mode}') model girişi ile uyumsuz. "
+                        f"Model beklediği kanal sayısı kullanılacak: {channels}"
+                    )
+        else:
+            channels = 1 if color_mode == "grayscale" else 3
+
+        logger.info(f"Model giriş kanalı: {channels}")
         output_files = []
         
         pbar = tqdm(total=len(files), desc="Model inference", unit="görüntü", ncols=100)
@@ -1438,15 +1457,36 @@ class ImageProcessor:
             for idx, filename in enumerate(batch_files):
                 filepath = os.path.join(input_dir, filename)
                 try:
-                    if color_mode == "grayscale":
-                        pixels = load_img(filepath, target_size=image_size, color_mode="grayscale")
-                        pixels = img_to_array(pixels)
-                        pixels = pixels.astype(np.float32)
-                        pixels = (pixels - 127.5) / 127.5
+                    pixels_raw = cv2.imread(filepath, cv2.IMREAD_UNCHANGED)
+                    if pixels_raw is None:
+                        raise ValueError("Dosya okunamadı veya format desteklenmiyor")
+
+                    if pixels_raw.ndim == 2:
+                        src_channels = 1
+                        pixels = pixels_raw
+                    elif pixels_raw.ndim == 3:
+                        src_channels = pixels_raw.shape[2]
+                        if src_channels == 1:
+                            src_channels = 1
+                            pixels = pixels_raw[:, :, 0]
+                        else:
+                            # OpenCV BGR/BGRA okur; alfa varsa at.
+                            pixels = cv2.cvtColor(pixels_raw[:, :, :3], cv2.COLOR_BGR2RGB)
+                            src_channels = 3
                     else:
-                        pixels = load_img(filepath, target_size=image_size)
-                        pixels = img_to_array(pixels)
-                        pixels = (pixels - 127.5) / 127.5
+                        raise ValueError(f"Beklenmeyen görüntü boyutu: {pixels_raw.shape}")
+
+                    # Modelin beklediği kanal sayısına otomatik dönüştür.
+                    if channels == 1 and src_channels == 3:
+                        pixels = cv2.cvtColor(pixels, cv2.COLOR_RGB2GRAY)
+                    elif channels == 3 and src_channels == 1:
+                        pixels = cv2.cvtColor(pixels, cv2.COLOR_GRAY2RGB)
+
+                    pixels = cv2.resize(pixels, (image_size[1], image_size[0]), interpolation=cv2.INTER_NEAREST)
+                    pixels = pixels.astype(np.float32)
+                    if channels == 1 and pixels.ndim == 2:
+                        pixels = np.expand_dims(pixels, axis=-1)
+                    pixels = (pixels - 127.5) / 127.5
                     batch_images.append(pixels)
                     valid_indices.append(idx)
                 except Exception as e:
@@ -1490,7 +1530,8 @@ class ImageProcessor:
                     else:
                         pred_uint8 = np.clip(pred, 0, 255).astype(np.uint8)
 
-                    if color_mode == "grayscale" or pred_uint8.ndim == 2:
+                    output_is_grayscale = (model_output_channels == 1)
+                    if output_is_grayscale or pred_uint8.ndim == 2:
                         if pred_uint8.ndim == 3:
                             pred_uint8 = pred_uint8[:, :, 0]
                         cv2.imwrite(output_filename, pred_uint8)
