@@ -49,8 +49,11 @@ class Config:
     # Veri dizini yolu
     DATA_DIR = "maps_zoom_level_19/sonuclar_19/"
     
-    # Renk modu: "grayscale", "rgb", "grayscale_with_equalize"
+    # Giris renk modu: "grayscale", "rgb", "grayscale_with_equalize"
     COLOR_MODE = "rgb"
+
+    # Cikis renk modu: "auto" (giris ile ayni), "grayscale", "rgb"
+    OUTPUT_COLOR_MODE = "auto"
     
     # Eğitim/Doğrulama oranı (0.0 - 1.0 arası, eğitim için kullanılacak oran)
     TRAIN_SPLIT = 0.9
@@ -108,8 +111,17 @@ class Config:
     # Optimizer: "adam", "sgd", "rmsprop"
     OPTIMIZER = "adam"
     
-    # Loss fonksiyonu: "hybrid", "mse", "mae", "binary_crossentropy", "ssim"
-    LOSS_FUNCTION = "hybrid"
+    # Loss fonksiyonu: "weighted_hybrid", "hybrid", "mse", "mae", "binary_crossentropy", "ssim"
+    LOSS_FUNCTION = "weighted_hybrid"
+
+    # weighted_hybrid loss ayarlari (etikette beyaz agirlik baskinsa cokusmeyi azaltmak icin)
+    # -1.0 siyah, +1.0 beyaz oldugu varsayilir.
+    WEIGHTED_HYBRID_L1 = 0.8
+    WEIGHTED_HYBRID_SSIM = 0.2
+    WEIGHTED_NON_WHITE_THRESHOLD = 0.85
+    WEIGHTED_DARK_THRESHOLD = -0.6
+    WEIGHTED_NON_WHITE_WEIGHT = 2.0
+    WEIGHTED_DARK_WEIGHT = 8.0
     
     # ------------------------------ KAYIT AYARLARI ----------------------------
     # Model kayıt dizini (None = mevcut dizin)
@@ -141,6 +153,14 @@ class Config:
     # Cache dosyası adı (VALIDATE_FILES="cached" için)
     VALIDATION_CACHE_FILE = "valid_files_cache.json"
 
+    # Bos/neredeyse bos hedef karolari filtreleme (label tarafi)
+    FILTER_EMPTY_TILES = True
+    FILTER_EMPTY_TILES_ON_VAL = False
+    EMPTY_TILE_WHITE_THRESHOLD = 245.0
+    EMPTY_TILE_DARK_THRESHOLD = 10.0
+    EMPTY_TILE_MAX_WHITE_RATIO = 0.99
+    EMPTY_TILE_MIN_DARK_RATIO = 0.005
+
     # ------------------------------ GELİŞMİŞ AYARLAR --------------------------
     # Early stopping (0 = devre dışı)
     EARLY_STOPPING_PATIENCE = 8
@@ -165,11 +185,31 @@ def get_timestamp():
     return datetime.datetime.strftime(datetime.datetime.now(), '%d_%m_%Y__%H_%M')
 
 
-def get_channels():
-    """Renk moduna göre kanal sayısını döndürür."""
+def get_input_channels():
+    """Giris renk moduna gore kanal sayisini dondurur."""
     if Config.COLOR_MODE == "rgb":
         return 3
     return 1
+
+
+def get_output_channels():
+    """Cikis renk moduna gore kanal sayisini dondurur."""
+    mode = str(Config.OUTPUT_COLOR_MODE).lower()
+    if mode in ("auto", "same", "input", "none"):
+        return get_input_channels()
+    if mode == "rgb":
+        return 3
+    if mode in ("grayscale", "gray", "bw", "blackwhite", "black_white"):
+        return 1
+    raise ValueError(
+        f"Geçersiz OUTPUT_COLOR_MODE: {Config.OUTPUT_COLOR_MODE}. "
+        f"Geçerli değerler: auto, grayscale, rgb"
+    )
+
+
+def get_channels():
+    """Geriye donuk uyumluluk icin giris kanal sayisi."""
+    return get_input_channels()
 
 
 def get_input_shape(for_inference=False):
@@ -179,8 +219,8 @@ def get_input_shape(for_inference=False):
         for_inference: True ise dinamik boyut döndürür (None, None, channels)
     """
     if for_inference and Config.DYNAMIC_INPUT_FOR_INFERENCE:
-        return (None, None, get_channels())
-    return (Config.IMAGE_SIZE, Config.IMAGE_SIZE, get_channels())
+        return (None, None, get_input_channels())
+    return (Config.IMAGE_SIZE, Config.IMAGE_SIZE, get_input_channels())
 
 
 # ==============================================================================
@@ -203,6 +243,26 @@ def hybrid_loss(y_true, y_pred):
     return 0.8 * l1 + 0.2 * ssim
 
 
+def weighted_hybrid_loss(y_true, y_pred):
+    """L1 + SSIM (etikette koyu detaylara agirlik vererek)."""
+    y_true = tf.clip_by_value(y_true, -1.0, 1.0)
+    y_pred = tf.clip_by_value(y_pred, -1.0, 1.0)
+
+    # Etikette beyaz agirlik baskin oldugunda, koyu/icerik piksellerine daha fazla agirlik ver.
+    non_white_mask = tf.cast(y_true <= Config.WEIGHTED_NON_WHITE_THRESHOLD, tf.float32)
+    dark_mask = tf.cast(y_true <= Config.WEIGHTED_DARK_THRESHOLD, tf.float32)
+
+    weights = tf.ones_like(y_true)
+    weights += non_white_mask * (Config.WEIGHTED_NON_WHITE_WEIGHT - 1.0)
+    weights += dark_mask * (Config.WEIGHTED_DARK_WEIGHT - Config.WEIGHTED_NON_WHITE_WEIGHT)
+
+    abs_err = tf.abs(y_true - y_pred)
+    weighted_l1 = tf.reduce_sum(abs_err * weights) / (tf.reduce_sum(weights) + K.epsilon())
+
+    ssim = 1 - tf.reduce_mean(tf.image.ssim(y_true, y_pred, 2.0))
+    return Config.WEIGHTED_HYBRID_L1 * weighted_l1 + Config.WEIGHTED_HYBRID_SSIM * ssim
+
+
 def ssim_metric(y_true, y_pred):
     """Takip metrigi: SSIM (1'e yaklastikca daha iyi)."""
     y_true = tf.clip_by_value(y_true, -1.0, 1.0)
@@ -218,6 +278,8 @@ def get_loss_function():
     """Yapılandırmaya göre kayıp fonksiyonunu döndürür."""
     if Config.LOSS_FUNCTION == "ssim":
         return ssim_loss
+    elif Config.LOSS_FUNCTION == "weighted_hybrid":
+        return weighted_hybrid_loss
     elif Config.LOSS_FUNCTION == "hybrid":
         return hybrid_loss
     elif Config.LOSS_FUNCTION == "mse":
@@ -264,14 +326,29 @@ def get_random_size():
     return tf.gather(sizes, idx)
 
 
+def convert_channels(image, source_channels, target_channels):
+    """Goruntuyu kaynak kanaldan hedef kanal sayisina cevirir."""
+    if source_channels == target_channels:
+        return image
+    if source_channels == 3 and target_channels == 1:
+        return tf.image.rgb_to_grayscale(image)
+    if source_channels == 1 and target_channels == 3:
+        return tf.image.grayscale_to_rgb(image)
+    raise ValueError(
+        f"Desteklenmeyen kanal donusumu: {source_channels} -> {target_channels}"
+    )
+
+
 def load_and_preprocess(image_path):
     """Görüntüyü yükler ve ön işler."""
-    channels = get_channels()
+    input_channels = get_input_channels()
+    output_channels = get_output_channels()
+    decode_channels = 3 if (input_channels == 3 or output_channels == 3) else 1
     use_equalize = Config.COLOR_MODE == "grayscale_with_equalize"
 
     # Dosyayı oku ve decode et
     img_raw = tf.io.read_file(image_path)
-    img = tf.image.decode_image(img_raw, channels=channels)
+    img = tf.image.decode_image(img_raw, channels=decode_channels)
 
     # Veri tipini float32'ye çevir
     img = tf.cast(img, tf.float32)
@@ -282,8 +359,12 @@ def load_and_preprocess(image_path):
     width = shape[1] // 2  # Girdi ve etiket yan yana
 
     # Girdi ve etiketi ayır
-    input_img = tf.slice(img, [0, 0, 0], [height, width, channels])
-    label_img = tf.slice(img, [0, width, 0], [height, width, channels])
+    input_img = tf.slice(img, [0, 0, 0], [height, width, decode_channels])
+    label_img = tf.slice(img, [0, width, 0], [height, width, decode_channels])
+
+    # Girdi ve hedef kanal sayilarini ayri ayri hazirla
+    input_img = convert_channels(input_img, decode_channels, input_channels)
+    label_img = convert_channels(label_img, decode_channels, output_channels)
 
     # Histogram eşitleme (sadece grayscale_with_equalize modunda)
     if use_equalize and TFA_AVAILABLE:
@@ -303,12 +384,14 @@ def load_and_preprocess(image_path):
 
 def load_and_preprocess_multiscale(image_path):
     """Multi-scale eğitim için görüntüyü rastgele boyutta yükler."""
-    channels = get_channels()
+    input_channels = get_input_channels()
+    output_channels = get_output_channels()
+    decode_channels = 3 if (input_channels == 3 or output_channels == 3) else 1
     use_equalize = Config.COLOR_MODE == "grayscale_with_equalize"
 
     # Dosyayı oku ve decode et
     img_raw = tf.io.read_file(image_path)
-    img = tf.image.decode_image(img_raw, channels=channels)
+    img = tf.image.decode_image(img_raw, channels=decode_channels)
     img = tf.cast(img, tf.float32)
 
     # Boyutları al
@@ -317,8 +400,12 @@ def load_and_preprocess_multiscale(image_path):
     width = shape[1] // 2
 
     # Girdi ve etiketi ayır
-    input_img = tf.slice(img, [0, 0, 0], [height, width, channels])
-    label_img = tf.slice(img, [0, width, 0], [height, width, channels])
+    input_img = tf.slice(img, [0, 0, 0], [height, width, decode_channels])
+    label_img = tf.slice(img, [0, width, 0], [height, width, decode_channels])
+
+    # Girdi ve hedef kanal sayilarini ayri ayri hazirla
+    input_img = convert_channels(input_img, decode_channels, input_channels)
+    label_img = convert_channels(label_img, decode_channels, output_channels)
 
     # Histogram eşitleme
     if use_equalize and TFA_AVAILABLE:
@@ -334,6 +421,26 @@ def load_and_preprocess_multiscale(image_path):
     label_img = (label_img - 127.5) / 127.5
 
     return (input_img, label_img)
+
+
+def keep_informative_tile(input_img, label_img):
+    """Hedefte tamamen/neredeyse tamamen bos (beyaz) karolari eler."""
+    del input_img  # Sadece hedef etiket dagilimi kullanilir.
+
+    label_img = tf.clip_by_value(label_img, -1.0, 1.0)
+    label_u8 = (label_img + 1.0) * 127.5
+    label_gray = tf.reduce_mean(label_u8, axis=-1)
+
+    white_ratio = tf.reduce_mean(
+        tf.cast(label_gray >= Config.EMPTY_TILE_WHITE_THRESHOLD, tf.float32)
+    )
+    dark_ratio = tf.reduce_mean(
+        tf.cast(label_gray <= Config.EMPTY_TILE_DARK_THRESHOLD, tf.float32)
+    )
+
+    keep_by_white_ratio = white_ratio <= Config.EMPTY_TILE_MAX_WHITE_RATIO
+    keep_by_dark_ratio = dark_ratio >= Config.EMPTY_TILE_MIN_DARK_RATIO
+    return tf.logical_or(keep_by_white_ratio, keep_by_dark_ratio)
 
 
 import json
@@ -503,6 +610,13 @@ def create_datasets():
     
     print(f"Eğitim seti: {len(train_paths)} görüntü")
     print(f"Doğrulama seti: {len(val_paths)} görüntü")
+    if Config.FILTER_EMPTY_TILES:
+        print(
+            "Bos karo filtresi aktif: "
+            f"white>={Config.EMPTY_TILE_WHITE_THRESHOLD}, "
+            f"max_white_ratio={Config.EMPTY_TILE_MAX_WHITE_RATIO}, "
+            f"min_dark_ratio={Config.EMPTY_TILE_MIN_DARK_RATIO}"
+        )
     
     # Multi-scale eğitim bilgisi
     if Config.MULTI_SCALE_TRAINING:
@@ -531,11 +645,15 @@ def create_datasets():
     train_dataset = tf.data.Dataset.from_tensor_slices(train_paths)
     train_dataset = train_dataset.map(preprocess_fn, num_parallel_calls=parallel_calls)
     train_dataset = train_dataset.apply(tf.data.experimental.ignore_errors())  # Hataları atla
+    if Config.FILTER_EMPTY_TILES:
+        train_dataset = train_dataset.filter(keep_informative_tile)
     train_dataset = train_dataset.batch(batch_size).prefetch(buffer_size=prefetch_buffer)
     
     val_dataset = tf.data.Dataset.from_tensor_slices(val_paths)
     val_dataset = val_dataset.map(load_and_preprocess, num_parallel_calls=parallel_calls)
     val_dataset = val_dataset.apply(tf.data.experimental.ignore_errors())  # Hataları atla
+    if Config.FILTER_EMPTY_TILES and Config.FILTER_EMPTY_TILES_ON_VAL:
+        val_dataset = val_dataset.filter(keep_informative_tile)
     val_dataset = val_dataset.batch(Config.BATCH_SIZE).prefetch(buffer_size=prefetch_buffer)
     
     return train_dataset, val_dataset
@@ -547,7 +665,7 @@ def create_datasets():
 
 def create_autoencoder_model(input_shape):
     """Standart autoencoder modeli."""
-    channels = input_shape[-1]
+    channels = get_output_channels()
     filter_count = Config.FILTER_COUNT
     kernel_size = Config.KERNEL_SIZE
     strides = Config.STRIDES
@@ -579,7 +697,7 @@ def create_autoencoder_model(input_shape):
 
 def create_autoencoder_model_backup(input_shape):
     """Backup autoencoder modeli (alternatif mimari)."""
-    channels = input_shape[-1]
+    channels = get_output_channels()
     filter_count = Config.FILTER_COUNT
     kernel_size = Config.KERNEL_SIZE
     strides = Config.STRIDES
@@ -608,7 +726,7 @@ def create_autoencoder_model_backup(input_shape):
 
 def create_upsampled_autoencoder(input_shape):
     """UpSampling tabanli simetrik autoencoder (giris/cikis boyutu esit)."""
-    channels = input_shape[-1]
+    channels = get_output_channels()
     filter_count = Config.FILTER_COUNT
     kernel_size = Config.KERNEL_SIZE
     activation_func = Config.ACTIVATION_FUNC
@@ -641,7 +759,7 @@ def create_upsampled_autoencoder(input_shape):
 
 def create_advanced_autoencoder(input_shape):
     """Gelismis autoencoder (MaxPooling + Dropout)."""
-    channels = input_shape[-1]
+    channels = get_output_channels()
     filter_count = Config.FILTER_COUNT
     kernel_size = Config.KERNEL_SIZE
     strides = Config.STRIDES
@@ -706,7 +824,7 @@ def residual_block(x, filters, dropout_rate=0.0):
 
 def create_unet_residual_model(input_shape):
     """Uydu -> harita stil cevirimi icin oncelikli model (U-Net + residual skip)."""
-    channels = input_shape[-1]
+    channels = get_output_channels()
     base_filters = max(16, int(Config.FILTER_COUNT))
     dropout_rate = Config.DROPOUT_RATE
     activation_func = Config.ACTIVATION_FUNC
@@ -743,7 +861,7 @@ def create_unet_residual_model(input_shape):
 
 def create_gpt_autoencoder(input_shape):
     """GPT tarzi autoencoder (L1 regularization ile)."""
-    channels = input_shape[-1]
+    channels = get_output_channels()
     filter_count = Config.FILTER_COUNT
     kernel_size = Config.KERNEL_SIZE
     l1_reg = Config.L1_REGULARIZATION
@@ -787,7 +905,7 @@ def create_gpt_autoencoder(input_shape):
 
 def create_gpt_autoencoder_no_reg(input_shape):
     """GPT tarzi autoencoder (regularization olmadan)."""
-    channels = input_shape[-1]
+    channels = get_output_channels()
     filter_count = Config.FILTER_COUNT
     kernel_size = Config.KERNEL_SIZE
     activation_func = Config.ACTIVATION_FUNC
@@ -818,7 +936,7 @@ def create_gpt_autoencoder_no_reg(input_shape):
 
 def create_deneysel_model(input_shape):
     """Deneysel model (basit ve hızlı)."""
-    channels = input_shape[-1]
+    channels = get_output_channels()
     filter_count = Config.FILTER_COUNT
     kernel_size = Config.KERNEL_SIZE
     activation_func = Config.ACTIVATION_FUNC
@@ -843,7 +961,7 @@ def create_deneysel_model(input_shape):
 
 def create_classic_model(input_shape):
     """Klasik autoencoder modeli."""
-    channels = input_shape[-1]
+    channels = get_output_channels()
     filter_count = Config.FILTER_COUNT
     kernel_size = Config.KERNEL_SIZE
     activation_func = Config.ACTIVATION_FUNC
@@ -883,6 +1001,7 @@ def get_model(input_shape):
                 custom_objects={
                     'ssim_loss': ssim_loss,
                     'hybrid_loss': hybrid_loss,
+                    'weighted_hybrid_loss': weighted_hybrid_loss,
                     'ssim_metric': ssim_metric
                 }
             )
@@ -915,7 +1034,7 @@ def get_model(input_shape):
 def validate_model_output_shape(model, input_shape):
     """Modelin cikis seklinin giris ile uyumlu oldugunu dogrular."""
     output_shape = model.output_shape
-    expected_channels = get_channels()
+    expected_channels = get_output_channels()
 
     if output_shape[-1] != expected_channels:
         raise ValueError(
@@ -1014,11 +1133,14 @@ def get_callbacks():
 
 def print_config():
     """Mevcut yapılandırmayı yazdırır."""
+    input_channels = get_input_channels()
+    output_channels = get_output_channels()
     print("\n" + "=" * 60)
     print("                    YAPILANDIRMA")
     print("=" * 60)
     print(f"  Veri Dizini:        {Config.DATA_DIR}")
-    print(f"  Renk Modu:          {Config.COLOR_MODE}")
+    print(f"  Giris Renk Modu:    {Config.COLOR_MODE} ({input_channels} kanal)")
+    print(f"  Cikis Renk Modu:    {Config.OUTPUT_COLOR_MODE} ({output_channels} kanal)")
     print(f"  Görüntü Boyutu:     {Config.IMAGE_SIZE}x{Config.IMAGE_SIZE}")
     print(f"  Model Tipi:         {Config.MODEL_TYPE}")
     print(f"  Önceden Eğitilmiş:  {Config.PRETRAINED_MODEL or 'Yok'}")
