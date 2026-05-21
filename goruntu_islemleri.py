@@ -1767,6 +1767,19 @@ class ImageProcessor:
                     else:
                         pred_uint8 = np.clip(pred, 0, 255).astype(np.uint8)
 
+                    expected_h, expected_w = int(image_size[0]), int(image_size[1])
+                    pred_h, pred_w = pred_uint8.shape[:2]
+                    if pred_h != expected_h or pred_w != expected_w:
+                        logger.warning(
+                            f"Model ciktisi beklenen karo boyutundan farkli ({pred_h}x{pred_w}); "
+                            f"{expected_h}x{expected_w} boyutuna yeniden ornekleniyor."
+                        )
+                        pred_uint8 = cv2.resize(
+                            pred_uint8,
+                            (expected_w, expected_h),
+                            interpolation=cv2.INTER_NEAREST,
+                        )
+
                     output_is_grayscale = (model_output_channels == 1)
                     if output_is_grayscale or pred_uint8.ndim == 2:
                         if pred_uint8.ndim == 3:
@@ -2041,6 +2054,7 @@ class ImageProcessor:
                                     enhancement=enhancement,
                                     clahe_clip=clahe_clip
                                 )
+                                self._write_pipeline_metadata(model_output_dir, metadata)
                                 
                                 results['inference'].append({
                                     'model': model_name,
@@ -2075,6 +2089,7 @@ class ImageProcessor:
                         enhancement=enhancement,
                         clahe_clip=clahe_clip
                     )
+                    self._write_pipeline_metadata(model_output_dir, metadata)
                     
                     results['inference'].append({
                         'model': model_name,
@@ -2325,6 +2340,14 @@ class ImageProcessor:
             if file_handler is not None:
                 logger.removeHandler(file_handler)
                 file_handler.close()
+
+    def _write_pipeline_metadata(self, output_dir: str, metadata: Dict[str, Any]) -> None:
+        """Split metadata'sini model cikti klasorune tasir."""
+        self.create_output_directory(output_dir)
+        metadata_path = os.path.join(output_dir, 'metadata.json')
+        with open(metadata_path, 'w', encoding='utf-8') as f:
+            json.dump(metadata, f, indent=2, default=str)
+        logger.info(f"Metadata model cikti klasorune kopyalandi: {metadata_path}")
 
 
 def main():
