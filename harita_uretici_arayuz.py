@@ -51,6 +51,13 @@ NORMALIZATION_CHOICES = [
     ("Z-skoru  ·  karo bazlı standardizasyon", "zscore"),
 ]
 
+# Normalizasyondan önce karoya uygulanacak kontrast/histogram iyileştirmesi.
+ENHANCEMENT_CHOICES = [
+    ("Yok  ·  iyileştirme uygulanmaz", "none"),
+    ("Histogram eşitleme  ·  global kontrast", "hist_eq"),
+    ("CLAHE  ·  uyarlamalı yerel kontrast", "clahe"),
+]
+
 
 # ----------------------------------------------------------------------------
 # Klasör tarama yardımcıları
@@ -246,7 +253,7 @@ def _make_preview(merge_outputs, max_side=1600):
 # ----------------------------------------------------------------------------
 def run_pipeline(input_path, model_choice, model_file, reference_choice, reference_file,
                  tile_size, overlap, crop_overlap, batch_size, color_mode,
-                 normalization):
+                 normalization, enhancement, clahe_clip):
     """Pipeline'ı ayrı bir thread'de çalıştırır; logu canlı akıtan generator.
 
     Çıktı sırası: log_box, status_html, preview, downloads, run_btn
@@ -354,6 +361,8 @@ def run_pipeline(input_path, model_choice, model_file, reference_choice, referen
                 batch_size=batch_size,
                 normalization=normalization,
                 auto_reference=auto_reference,
+                enhancement=enhancement,
+                clahe_clip=float(clahe_clip),
             )
         except Exception as exc:
             holder['error'] = exc
@@ -624,6 +633,18 @@ def build_ui():
                         info="Karo, sinir ağına verilmeden önce nasıl ölçeklensin? "
                              "Modelin eğitimiyle aynı olmalı; yanlış seçim bozuk çıktı verir.",
                     )
+                    enhancement = gr.Dropdown(
+                        label="Görüntü iyileştirme (histogram)",
+                        choices=ENHANCEMENT_CHOICES, value="none",
+                        info="Normalizasyondan ÖNCE karoya uygulanan kontrast iyileştirmesi. "
+                             "Renkliyse yalnızca parlaklık kanalına uygulanır.",
+                    )
+                    clahe_clip = gr.Slider(
+                        label="CLAHE kontrast sınırı (clipLimit)",
+                        minimum=1.0, maximum=10.0, value=2.0, step=0.5,
+                        info="Yalnızca CLAHE seçiliyken etkilidir. Yüksek değer = "
+                             "daha güçlü kontrast (ve daha çok gürültü).",
+                    )
 
                 with gr.Row():
                     clear_btn = gr.Button("🧹  Temizle", variant="secondary", scale=1)
@@ -670,7 +691,7 @@ def build_ui():
             fn=run_pipeline,
             inputs=[input_file, model_dd, model_file, reference_dd, reference_file,
                     tile_size, overlap, crop_overlap, batch_size, color_mode,
-                    normalization],
+                    normalization, enhancement, clahe_clip],
             outputs=[log_box, status_html, preview, downloads, run_btn],
         )
         refresh_btn.click(

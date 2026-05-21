@@ -387,6 +387,54 @@ def apply_normalization(pixels: np.ndarray, mode: str) -> np.ndarray:
     return (pixels - 127.5) / 127.5
 
 
+# Karo, normalizasyondan ÖNCE uygulanabilecek kontrast/histogram iyileştirmeleri.
+ENHANCEMENT_MODES = ("none", "hist_eq", "clahe")
+
+
+def apply_enhancement(pixels: np.ndarray, mode: str, clahe_clip: float = 2.0) -> np.ndarray:
+    """Karoya kontrast/histogram iyileştirmesi uygular (uint8, normalizasyondan önce).
+
+    Args:
+        pixels: Görüntü dizisi (uint8 beklenir; RGB sırası). 2B grayscale veya
+            3B (H, W, 3) olabilir.
+        mode: 'none' -> dokunma, 'hist_eq' -> histogram eşitleme,
+              'clahe' -> kontrast sınırlı uyarlamalı histogram eşitleme.
+        clahe_clip: CLAHE için kontrast sınırı (clipLimit).
+
+    Returns:
+        İyileştirilmiş dizi (giriş ile aynı şekil ve uint8 dtype).
+    """
+    if mode not in ("hist_eq", "clahe"):
+        return pixels
+
+    img = pixels if pixels.dtype == np.uint8 else np.clip(pixels, 0, 255).astype(np.uint8)
+    is_gray = (img.ndim == 2) or (img.ndim == 3 and img.shape[2] == 1)
+    gray = img[:, :, 0] if (img.ndim == 3 and img.shape[2] == 1) else img
+
+    if mode == "hist_eq":
+        if is_gray:
+            out = cv2.equalizeHist(gray)
+        else:
+            # Renk bozulmasın diye yalnızca parlaklık (Y) kanalı eşitlenir.
+            ycrcb = cv2.cvtColor(img, cv2.COLOR_RGB2YCrCb)
+            ycrcb[:, :, 0] = cv2.equalizeHist(ycrcb[:, :, 0])
+            out = cv2.cvtColor(ycrcb, cv2.COLOR_YCrCb2RGB)
+    else:  # clahe
+        clahe = cv2.createCLAHE(clipLimit=float(clahe_clip), tileGridSize=(8, 8))
+        if is_gray:
+            out = clahe.apply(gray)
+        else:
+            # Yalnızca LAB uzayındaki L (parlaklık) kanalına uygulanır.
+            lab = cv2.cvtColor(img, cv2.COLOR_RGB2LAB)
+            lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+            out = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+
+    # Giriş (H, W, 1) biçimindeyse kanal eksenini koru.
+    if pixels.ndim == 3 and pixels.shape[2] == 1 and out.ndim == 2:
+        out = np.expand_dims(out, axis=-1)
+    return out
+
+
 class ImageProcessor:
     """Görüntü işleme sınıfı - bölme, birleştirme ve jeoreferanslama işlemleri."""
     
@@ -1363,7 +1411,9 @@ class ImageProcessor:
         image_size: Tuple[int, int] = CONFIG["pipeline"]["image_size"],
         color_mode: str = CONFIG["pipeline"]["color_mode"],
         batch_size: int = CONFIG["pipeline"]["batch_size"],
-        normalization: str = "minus1_1"
+        normalization: str = "minus1_1",
+        enhancement: str = "none",
+        clahe_clip: float = 2.0
     ) -> List[str]:
         """
         Parçalara bölünmüş görüntüleri sinir ağı modelinden batch inference ile geçirir.
@@ -1381,6 +1431,9 @@ class ImageProcessor:
             batch_size: Batch boyutu (GPU VRAM'a göre ayarlayın, varsayılan: 16)
             normalization: Karo girişine uygulanacak normalizasyon
                 ("minus1_1", "zero_1", "raw", "zscore"; bkz. apply_normalization)
+            enhancement: Normalizasyondan önce uygulanacak kontrast/histogram
+                iyileştirmesi ("none", "hist_eq", "clahe"; bkz. apply_enhancement)
+            clahe_clip: CLAHE için kontrast sınırı (clipLimit)
             
         Returns:
             İşlenmiş dosya isimlerinin listesi
@@ -1544,6 +1597,16 @@ class ImageProcessor:
         }
         logger.info(f"Karo normalizasyonu: {normalization} -> {_norm_desc[normalization]}")
 
+        if enhancement not in ENHANCEMENT_MODES:
+            logger.warning(f"Bilinmeyen iyileştirme '{enhancement}'; 'none' kullanılacak.")
+            enhancement = "none"
+        if enhancement == "clahe":
+            logger.info(f"Görüntü iyileştirme: CLAHE (clipLimit={clahe_clip})")
+        elif enhancement == "hist_eq":
+            logger.info("Görüntü iyileştirme: histogram eşitleme")
+        else:
+            logger.info("Görüntü iyileştirme: yok")
+
         # Modelin son katman aktivasyonundan çıkış değer aralığını belirle.
         # Böylece tahmin -> uint8 dönüşümü her karoda tutarlı olur; karo bazlı
         # tahmine bağlı yanlış ölçekleme ve dikiş artefaktı önlenir.
@@ -1602,6 +1665,8 @@ class ImageProcessor:
                         pixels = cv2.cvtColor(pixels, cv2.COLOR_GRAY2RGB)
 
                     pixels = cv2.resize(pixels, (image_size[1], image_size[0]), interpolation=cv2.INTER_NEAREST)
+                    # Kontrast/histogram iyileştirmesi uint8 üzerinde, normalizasyondan önce.
+                    pixels = apply_enhancement(pixels, enhancement, clahe_clip)
                     pixels = pixels.astype(np.float32)
                     if channels == 1 and pixels.ndim == 2:
                         pixels = np.expand_dims(pixels, axis=-1)
@@ -1695,7 +1760,9 @@ class ImageProcessor:
         color_mode: str = CONFIG["pipeline"]["color_mode"],
         batch_size: int = CONFIG["pipeline"]["batch_size"],
         normalization: str = "minus1_1",
-        auto_reference: bool = True
+        auto_reference: bool = True,
+        enhancement: str = "none",
+        clahe_clip: float = 2.0
     ) -> Dict[str, Any]:
         """
         Tüm işlemleri sırayla çalıştırır: Böl -> Model Inference -> Birleştir -> Jeoreferansla
@@ -1864,7 +1931,9 @@ class ImageProcessor:
                                     image_size=image_size,
                                     color_mode=color_mode,
                                     batch_size=batch_size,
-                                    normalization=normalization
+                                    normalization=normalization,
+                                    enhancement=enhancement,
+                                    clahe_clip=clahe_clip
                                 )
                                 
                                 results['inference'].append({
@@ -1893,7 +1962,9 @@ class ImageProcessor:
                         image_size=image_size,
                         color_mode=color_mode,
                         batch_size=batch_size,
-                        normalization=normalization
+                        normalization=normalization,
+                        enhancement=enhancement,
+                        clahe_clip=clahe_clip
                     )
                     
                     results['inference'].append({
