@@ -15,6 +15,14 @@ from tensorflow.keras import backend as K
 
 import os
 
+try:
+    import tensorflow_addons as tfa
+    TFA_AVAILABLE = True
+except Exception as e:
+    TFA_AVAILABLE = False
+    tfa = None
+    print("UYARI: tensorflow_addons devre disi ({}). Histogram esitleme atlanacak.".format(e))
+
 an = datetime.datetime.now()
 zaman = datetime.datetime.strftime(an, '%d_%m_%Y__%H_%M')
 
@@ -60,12 +68,6 @@ train_image_paths = all_image_paths[:split_at]
 val_image_paths = all_image_paths[split_at:]        
 
 
-import tensorflow_addons as tfa 
-
-
-
-
-
 def load_and_preprocess(image_path):
     # try:
         # Dosyayı oku ve decode et
@@ -90,7 +92,8 @@ def load_and_preprocess(image_path):
         input_img = tf.slice(img, [0, 0, 0], [height, width, 1])
         label_img = tf.slice(img, [0, width, 0], [height, width, 1])
         
-        input_img = tfa.image.equalize(input_img) #DENEYSEL HISTOGRAM EŞİTLEME
+        if TFA_AVAILABLE:
+            input_img = tfa.image.equalize(input_img) #DENEYSEL HISTOGRAM EŞİTLEME
 
         # Boyutlandırma
         input_img = tf.image.resize(input_img, [544, 544], method=tf.image.ResizeMethod.NEAREST_NEIGHBOR)

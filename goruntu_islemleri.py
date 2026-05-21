@@ -30,6 +30,7 @@ Kullanım:
 
 import os
 import sys
+import json
 import argparse
 import logging
 from pathlib import Path
@@ -125,14 +126,16 @@ CONFIG = {
         # şeklinde adlandırılır. Örn: goruntu_0_0.jpg, goruntu_3_12.jpg
         "prefix": "goruntu",
 
-        # Karo kayıt formatı. "jpg" lossy ama küçük boyut; "png" kayıpsız
-        # ama büyük; "tif" coğrafi veri için.
-        "format": "jpg",
+        # Karo kayıt formatı. "png" kayıpsız (önerilen - JPEG artefaktı modele
+        # ve final GeoTIFF'e taşınmaz); "jpg" lossy ama küçük; "tif" coğrafi veri için.
+        "format": "png",
 
         # True ise bölme sonrası metadata.json dosyası oluşturulur.
         # Metadata grid boyutları, tile_size, frame_size, overlap gibi bilgileri içerir
         # ve birleştirme aşamasında otomatik okunur.
-        "save_metadata": False,
+        # DİKKAT: Bu değer True olmalı; aksi halde merge işlemi karoların kesin
+        # yerleşim koordinatlarını bilemez ve kenarlarda hizalama bozulur.
+        "save_metadata": True,
 
         # True ise bölme sonrası matplotlib ile tüm karolar görselleştirilir.
         # Büyük görüntülerde (binlerce karo) çok yavaş olabilir.
@@ -154,8 +157,9 @@ CONFIG = {
         "input_dir": "parcalar",
 
         # Birleştirilmiş görüntünün kaydedileceği varsayılan dosya adı.
-        # CLI'da -o ile değiştirilebilir.
-        "output": "birlestirilmis.jpg",
+        # CLI'da -o ile değiştirilebilir. PNG kayıpsızdır; final GeoTIFF
+        # girdisinde JPEG artefaktı istemiyorsanız PNG tercih edin.
+        "output": "birlestirilmis.png",
 
         # Her karonun HER KENARINDAN kırpılacak piksel sayısı.
         # Bölme sırasında eklenen örtüşme (overlap) burada kırpılır.
@@ -356,6 +360,33 @@ except ImportError:
     logger.warning("TensorFlow bulunamadı. Model inference özelliği kullanılamayacak.")
 
 
+# Sinir ağına verilmeden önce karo piksellerine uygulanacak normalizasyon modları.
+NORMALIZATION_MODES = ("minus1_1", "zero_1", "raw", "zscore")
+
+
+def apply_normalization(pixels: np.ndarray, mode: str) -> np.ndarray:
+    """Karo piksellerini (float32, 0-255 aralığında) sinir ağı girişine normalize eder.
+
+    Args:
+        pixels: float32 görüntü dizisi, ham değer aralığı [0, 255].
+        mode: 'minus1_1' -> [-1, 1] (tanh), 'zero_1' -> [0, 1] (sigmoid),
+              'raw' -> normalize yok, 'zscore' -> karo bazlı standardizasyon.
+
+    Returns:
+        Normalize edilmiş float32 dizi.
+    """
+    if mode == "zero_1":
+        return pixels / 255.0
+    if mode == "raw":
+        return pixels
+    if mode == "zscore":
+        mean = float(np.mean(pixels))
+        std = float(np.std(pixels))
+        return (pixels - mean) / (std + 1e-7)
+    # Varsayılan: 'minus1_1' -> [-1, 1]
+    return (pixels - 127.5) / 127.5
+
+
 class ImageProcessor:
     """Görüntü işleme sınıfı - bölme, birleştirme ve jeoreferanslama işlemleri."""
     
@@ -418,48 +449,66 @@ class ImageProcessor:
         
         logger.info(f"Referans dizininde {len(reference_files)} dosya bulundu: {reference_dir}")
         
-        # Anahtar kelimelere göre eşleşme bul
+        # Anahtar kelimelere göre eşleşme bul.
+        # ÖNEMLİ: Yalnızca bölge anahtar kelimesi (urgup, karlik, ...) eşleşirse
+        # sonuç güvenli kabul edilir. ana_harita/georef/utm gibi ipuçları tek
+        # başına yanlış bölgenin referansını seçtirebileceği için belirleyici
+        # sayılmaz; aksi halde sessizce yanlış konumlu GeoTIFF üretilir.
         best_match = None
         best_score = 0
-        
+        best_match_has_keyword = False
+
         for ref_file in reference_files:
             ref_lower = ref_file.lower()
             score = 0
-            
-            # Anahtar kelimeler için puan ver (daha yüksek öncelik)
+            keyword_hit = False
+
+            # Bölge anahtar kelimeleri (belirleyici - yüksek puan)
             for keyword in keywords:
                 if keyword in ref_lower:
-                    score += 20  # Daha yüksek puan
-            
+                    score += 20
+                    keyword_hit = True
+
             # "ana_harita" ile başlayan dosyalar için ekstra puan (standart format)
             if ref_lower.startswith('ana_harita'):
                 score += 10
-            
+
             # "georef", "georeference", "reference" gibi kelimeler için ekstra puan
             if any(word in ref_lower for word in ['georef', 'reference']):
                 score += 5
-            
+
             # "utm" kelimesi için ekstra puan
             if 'utm' in ref_lower:
                 score += 3
-            
+
             if score > best_score:
                 best_score = score
                 best_match = ref_file
-        
-        if best_match:
+                best_match_has_keyword = keyword_hit
+
+        # Yalnızca bölge anahtar kelimesi eşleşmesi güvenli kabul edilir.
+        if best_match and best_match_has_keyword:
             ref_path = os.path.join(reference_dir, best_match)
             logger.info(f"✓ Referans raster bulundu: {best_match} (eşleşme puanı: {best_score})")
-            logger.info(f"  Görüntü: {os.path.basename(image_filename)}")
+            logger.info(f"  Görüntü:  {os.path.basename(image_filename)}")
             logger.info(f"  Referans: {best_match}")
             return ref_path
-        
-        # Eşleşme yoksa ilk referans dosyasını kullan
-        if len(reference_files) > 0:
-            ref_path = os.path.join(reference_dir, reference_files[0])
-            logger.warning(f"Tam eşleşme bulunamadı, varsayılan referans kullanılıyor: {reference_files[0]}")
-            return ref_path
-        
+
+        # Güvenli eşleşme yok: sessizce yanlış referans seçmek yerine None döndür.
+        # Çağıran (run_full_pipeline) None gelince jeoreferanslamayı atlar.
+        if keywords:
+            logger.error(
+                f"'{base_name}' için bölge ({', '.join(keywords)}) ile eşleşen "
+                f"referans raster bulunamadı. Otomatik eşleştirme iptal edildi. "
+                f"reference_raster parametresi ile referansı elle belirtin."
+            )
+        else:
+            logger.error(
+                f"'{base_name}' dosya adında tanınan bölge anahtar kelimesi yok "
+                f"({', '.join(CONFIG['reference']['auto_match_keywords'])}). "
+                f"Otomatik referans seçilemedi. reference_raster parametresi ile "
+                f"referansı elle belirtin veya dosya adına bölge adı ekleyin."
+            )
         return None
     
     def load_image(self, path: str) -> np.ndarray:
@@ -649,6 +698,9 @@ class ImageProcessor:
 
         y_starts = _compute_starts(height, tile_size, calculated_frame_size)
         x_starts = _compute_starts(width, tile_size, calculated_frame_size)
+        # KONVANSIYON: num_frames_x = satir sayisi (dikey/Y ekseni, len(y_starts));
+        # num_frames_y = sutun sayisi (yatay/X ekseni, len(x_starts)). Isimlendirme
+        # tarihsel sebeple terstir; split ve merge bu konvansiyonu tutarli kullanir.
         num_frames_x = len(y_starts)
         num_frames_y = len(x_starts)
         
@@ -696,11 +748,11 @@ class ImageProcessor:
                 # Dosya adını oluştur
                 filename = os.path.join(output_dir, f'{prefix}_{i}_{j}.{format}')
                 
-                # Kaydet
-                if format.lower() in ['tif', 'tiff']:
-                    cv2.imwrite(filename, crop)
-                else:
+                # Kaydet (JPEG kalite parametresi yalnızca jpg/jpeg için anlamlı)
+                if format.lower() in ['jpg', 'jpeg']:
                     cv2.imwrite(filename, crop, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                else:
+                    cv2.imwrite(filename, crop)
                 
                 if keep_in_memory:
                     img_cropped.append(crop)
@@ -779,8 +831,7 @@ class ImageProcessor:
         
         if os.path.exists(metadata_path):
             try:
-                import json
-                with open(metadata_path, 'r') as f:
+                with open(metadata_path, 'r', encoding='utf-8') as f:
                     metadata = json.load(f)
                 logger.info(f"Metadata yüklendi: {metadata_path}")
                 
@@ -804,7 +855,11 @@ class ImageProcessor:
             except Exception as e:
                 logger.warning(f"Metadata yüklenemedi: {e}")
         else:
-            logger.info(f"Metadata dosyası bulunamadı: {metadata_path}")
+            logger.warning(
+                f"Metadata dosyası bulunamadı: {metadata_path}. "
+                f"Karo yerleşimi tahmin edilecek; kenarlarda hizalama bozulabilir. "
+                f"Doğru sonuç için split işlemini save_metadata=True ile çalıştırın."
+            )
         
         # İlk görüntüyü yükle ve boyutları al
         first_img_path = os.path.join(input_dir, files[0])
@@ -860,7 +915,7 @@ class ImageProcessor:
                             j = int(parts[-1].split('.')[0])
                             max_i = max(max_i, i)
                             max_j = max(max_j, j)
-                    except:
+                    except (ValueError, IndexError):
                         continue
                 
                 if max_i > 0 or max_j > 0:
@@ -923,7 +978,7 @@ class ImageProcessor:
         if y_starts is not None and x_starts is not None:
             logger.info("Konumsal yerlestirme: metadata x_starts/y_starts kullanilacak")
 
-        # Dosyalari i/j indeksine gore esle. B?ylece stale dosyalar sirayi bozmaz.
+        # Dosyalari i/j indeksine gore esle. Boylece stale dosyalar sirayi bozmaz.
         expected_tiles = num_frames_x * num_frames_y
         indexed_files: Dict[Tuple[int, int], str] = {}
         unindexed_files = []
@@ -968,21 +1023,21 @@ class ImageProcessor:
                 tile_plan.append((i, j, img_file))
 
         if len(tile_plan) == 0:
-            raise ValueError("Birle?tirilecek g?r?nt? bulunamad?!")
+            raise ValueError("Birleştirilecek görüntü bulunamadı!")
 
-        # T?m g?r?nt?leri y?kle ve sadece i? kenarlardaki overlap'i k?rp.
-        # D?? s?n?r korunur; b?ylece jeoreferanslama s?ras?nda global ofset olu?maz.
+        # Tüm görüntüleri yükle ve sadece iç kenarlardaki overlap'i kırp.
+        # Dış sınır korunur; böylece jeoreferanslama sırasında global ofset oluşmaz.
         tile_records = []
-        pbar = tqdm(tile_plan, desc="G?r?nt?ler y?kleniyor", unit="dosya", ncols=100) if TQDM_AVAILABLE else tile_plan
+        pbar = tqdm(tile_plan, desc="Görüntüler yükleniyor", unit="dosya", ncols=100) if TQDM_AVAILABLE else tile_plan
 
         for i, j, img_file in pbar:
             img_path = os.path.join(input_dir, img_file)
             img = cv2.imread(img_path)
             if img is None:
-                logger.warning(f"G?r?nt? y?klenemedi, atlan?yor: {img_path}")
+                logger.warning(f"Görüntü yüklenemedi, atlanıyor: {img_path}")
                 continue
 
-            # Y?klenen karonun boyutlar?n? do?rula
+            # Yüklenen karonun boyutlarını doğrula
             h, w = img.shape[:2]
             if h != tile_size or w != tile_size:
                 logger.warning(
@@ -990,7 +1045,7 @@ class ImageProcessor:
                     f"beklenen: {tile_size}x{tile_size}"
                 )
 
-            # Sadece i? kenarlar k?rp?l?r, d?? s?n?r korunur.
+            # Sadece iç kenarlar kırpılır, dış sınır korunur.
             top_crop = crop_overlap if i > 0 else 0
             bottom_crop = crop_overlap if i < (num_frames_x - 1) else 0
             left_crop = crop_overlap if j > 0 else 0
@@ -1001,9 +1056,9 @@ class ImageProcessor:
 
             if y2 <= top_crop or x2 <= left_crop:
                 logger.warning(
-                    f"Karo {img_file} i?in k?rpma ge?ersiz: "
+                    f"Karo {img_file} için kırpma geçersiz: "
                     f"({top_crop}, {bottom_crop}, {left_crop}, {right_crop}), "
-                    f"boyut={h}x{w}. Karo atland?."
+                    f"boyut={h}x{w}. Karo atlandı."
                 )
                 continue
 
@@ -1059,12 +1114,12 @@ class ImageProcessor:
         if output_dir:
             self.create_output_directory(output_dir)
         
-        # Kaydet
-        if output_path.lower().endswith(('.tif', '.tiff')):
-            cv2.imwrite(output_path, merged_image)
-        else:
+        # Kaydet (JPEG kalite parametresi yalnızca jpg/jpeg için anlamlı)
+        if output_path.lower().endswith(('.jpg', '.jpeg')):
             cv2.imwrite(output_path, merged_image, [cv2.IMWRITE_JPEG_QUALITY, 95])
-        
+        else:
+            cv2.imwrite(output_path, merged_image)
+
         logger.info(f"Birleştirilmiş görüntü kaydedildi: {output_path}, Boyut: {merged_image.shape}")
         
         return merged_image
@@ -1079,7 +1134,8 @@ class ImageProcessor:
         nodata: Optional[float] = CONFIG["georef"]["nodata"],
         target_transform: Optional[Any] = None,
         target_crs: Optional[Any] = None,
-        force_reference_shape: bool = False
+        force_reference_shape: bool = False,
+        transform_grid_shape: Optional[Tuple[int, int]] = None
     ) -> None:
         """
         Görüntüyü referans raster'ın coğrafi bilgileriyle jeoreferanslar.
@@ -1098,6 +1154,9 @@ class ImageProcessor:
             target_transform: Çıktıya uygulanacak transform (None ise referans transformu)
             target_crs: Çıktıya uygulanacak CRS (None ise referans CRS'i)
             force_reference_shape: True ise çıktı boyutu referans raster ile aynı yapılır
+            transform_grid_shape: target_transform'un yazıldığı grid boyutu (height, width).
+                Çıktı mozaiği bu boyuttan farklıysa transform, coğrafi kapsam birebir
+                korunacak şekilde otomatik ölçeklenir (referans bozulmaz).
             
         Raises:
             FileNotFoundError: Dosya bulunamazsa
@@ -1111,60 +1170,91 @@ class ImageProcessor:
         logger.info(f"Jeoreferanslama başlatılıyor: {input_path}")
         logger.info(f"Referans: {reference_path}")
         
-        # Giriş raster'ı aç
+        # Giriş raster'ından gerekli bilgileri oku (with ile güvenli kapatma)
         try:
-            input_raster = rasterio.open(input_path)
+            with rasterio.open(input_path) as input_raster:
+                input_band_count = input_raster.count
+                input_crs = input_raster.crs
+                logger.info(f"Giriş görüntüsü kanal sayısı: {input_band_count}")
+
+                # Tüm bandları oku
+                if input_band_count == 1:
+                    # Grayscale: tek band
+                    data = input_raster.read(1)
+                    data = np.expand_dims(data, axis=0)  # (H, W) -> (1, H, W)
+                elif input_band_count >= 3:
+                    # RGB veya RGBA: ilk 3 bandı al
+                    data = input_raster.read([1, 2, 3])  # (3, H, W)
+                    if input_band_count > 3:
+                        logger.info(f"  Alpha kanalı atlandı (toplam {input_band_count} band)")
+                else:
+                    # 2 kanallı nadir durum
+                    data = input_raster.read()
+                    logger.warning(f"  Beklenmeyen kanal sayısı: {input_band_count}")
         except Exception as e:
-            raise ValueError(f"Giriş raster açılamadı: {e}")
-        
-        # Referans raster'ı aç
+            raise ValueError(f"Giriş raster açılamadı/okunamadı: {e}")
+
+        # Referans raster'ından coğrafi bilgileri oku (with ile güvenli kapatma)
         try:
-            reference_raster = rasterio.open(reference_path)
+            with rasterio.open(reference_path) as reference_raster:
+                out_meta = reference_raster.meta.copy()
+                ref_transform = reference_raster.transform
+                ref_crs = reference_raster.crs
+                ref_shape = reference_raster.shape
         except Exception as e:
             raise ValueError(f"Referans raster açılamadı: {e}")
-        
-        # Giriş görüntüsünün kanal sayısını algıla
-        input_band_count = input_raster.count
-        logger.info(f"Giriş görüntüsü kanal sayısı: {input_band_count}")
-        
-        # Tüm bandları oku
-        try:
-            if input_band_count == 1:
-                # Grayscale: tek band
-                data = input_raster.read(1)
-                data = np.expand_dims(data, axis=0)  # (H, W) -> (1, H, W)
-            elif input_band_count >= 3:
-                # RGB veya RGBA: ilk 3 bandı al
-                data = input_raster.read([1, 2, 3])  # (3, H, W)
-                if input_band_count > 3:
-                    logger.info(f"  Alpha kanalı atlandı (toplam {input_band_count} band)")
-            else:
-                # 2 kanallı nadir durum
-                data = input_raster.read()
-                logger.warning(f"  Beklenmeyen kanal sayısı: {input_band_count}")
-        except Exception as e:
-            raise ValueError(f"Bandlar okunamadı: {e}")
-        
+
         # Çıktı kanal sayısını belirle
         output_band_count = 3 if input_band_count >= 3 else 1
 
         input_height = data.shape[1]
         input_width = data.shape[2]
-        out_height = reference_raster.shape[0] if force_reference_shape else input_height
-        out_width = reference_raster.shape[1] if force_reference_shape else input_width
+        out_height = ref_shape[0] if force_reference_shape else input_height
+        out_width = ref_shape[1] if force_reference_shape else input_width
 
-        if not force_reference_shape and (input_height != reference_raster.shape[0] or input_width != reference_raster.shape[1]):
-            logger.warning(
-                f"Giriş boyutu ({input_height}x{input_width}) referans boyutundan "
-                f"({reference_raster.shape[0]}x{reference_raster.shape[1]}) farklı. "
-                f"Çıkış grid'i giriş boyutunda korunacak."
+        if not force_reference_shape and (input_height != ref_shape[0] or input_width != ref_shape[1]):
+            logger.info(
+                f"Giriş mozaiği ({input_height}x{input_width}) referans boyutundan "
+                f"({ref_shape[0]}x{ref_shape[1]}) farklı; çıkış grid'i giriş boyutunda korunacak."
             )
 
-        out_transform = target_transform if target_transform is not None else reference_raster.transform
-        out_crs = target_crs if target_crs is not None else reference_raster.crs
-        
+        out_crs = target_crs if target_crs is not None else ref_crs
+
+        # --- Geotransform'u çıktı grid'ine göre belirle ---
+        # base_transform: kullanılacak transform; base_shape: o transform'un
+        # yazıldığı grid boyutu. Çıktı mozaiği bu grid'den biraz farklı boyutta
+        # olsa bile (örn. karolama/örtüşme nedeniyle) piksel boyutunu ölçekleyerek
+        # COĞRAFİ KAPSAMI birebir koruruz; böylece referans bozulmaz.
+        if target_transform is not None:
+            base_transform = target_transform
+            base_shape = transform_grid_shape  # None olabilir
+        else:
+            base_transform = ref_transform
+            base_shape = ref_shape
+
+        out_transform = base_transform
+        if not force_reference_shape and base_shape:
+            base_h, base_w = int(base_shape[0]), int(base_shape[1])
+            if base_h > 0 and base_w > 0 and (base_h != out_height or base_w != out_width):
+                sx = base_w / float(out_width)
+                sy = base_h / float(out_height)
+                out_transform = base_transform * Affine.scale(sx, sy)
+                logger.info(
+                    f"Geotransform çıkış boyutuna ölçeklendi (kapsam korunarak): "
+                    f"{base_h}x{base_w} -> {out_height}x{out_width} "
+                    f"(piksel ölçeği sx={sx:.6f}, sy={sy:.6f})"
+                )
+
+        # CRS uyarısı: giriş zaten farklı bir CRS'e sahipse körlemesine ezmek
+        # coğrafi olarak yanlış sonuç verir (yeniden projeksiyon yapılmaz).
+        if input_crs and out_crs and input_crs != out_crs:
+            logger.warning(
+                f"Giriş görüntüsünün CRS'i ({input_crs}) çıkış CRS'inden ({out_crs}) "
+                f"farklı. Yeniden projeksiyon YAPILMAZ; yalnızca çıkış CRS'i atanır. "
+                f"Giriş gerçekten farklı bir projeksiyonda üretildiyse sonuç yanlış olur."
+            )
+
         # Meta verileri referans raster'dan kopyala
-        out_meta = reference_raster.meta.copy()
         out_meta.update({
             'driver': 'GTiff',
             'width': out_width,
@@ -1217,10 +1307,7 @@ class ImageProcessor:
                     dst.write_band(i + 1, data[i])
         
         logger.info(f"Jeoreferanslı görüntü kaydedildi: {output_path} ({output_band_count} band)")
-        
-        input_raster.close()
-        reference_raster.close()
-    
+
     def visualize_crops(
         self,
         img_cropped: List[np.ndarray],
@@ -1275,7 +1362,8 @@ class ImageProcessor:
         model_path: str,
         image_size: Tuple[int, int] = CONFIG["pipeline"]["image_size"],
         color_mode: str = CONFIG["pipeline"]["color_mode"],
-        batch_size: int = CONFIG["pipeline"]["batch_size"]
+        batch_size: int = CONFIG["pipeline"]["batch_size"],
+        normalization: str = "minus1_1"
     ) -> List[str]:
         """
         Parçalara bölünmüş görüntüleri sinir ağı modelinden batch inference ile geçirir.
@@ -1291,6 +1379,8 @@ class ImageProcessor:
             image_size: Görüntü boyutu (height, width)
             color_mode: Renk modu ("grayscale" veya "rgb")
             batch_size: Batch boyutu (GPU VRAM'a göre ayarlayın, varsayılan: 16)
+            normalization: Karo girişine uygulanacak normalizasyon
+                ("minus1_1", "zero_1", "raw", "zscore"; bkz. apply_normalization)
             
         Returns:
             İşlenmiş dosya isimlerinin listesi
@@ -1311,9 +1401,10 @@ class ImageProcessor:
         # Çıktı dizinini oluştur
         self.create_output_directory(output_dir)
         # Eski inference dosyalari yeni merge sirasini bozmasin.
+        # Yalnizca bu fonksiyonun urettigi .png dosyalari silinir (veri kaybi riskini azaltir).
         for old_name in os.listdir(output_dir):
             old_path = os.path.join(output_dir, old_name)
-            if os.path.isfile(old_path) and old_name.lower().endswith(('.jpg', '.jpeg', '.png', '.tif', '.tiff')):
+            if os.path.isfile(old_path) and old_name.lower().endswith('.png'):
                 try:
                     os.remove(old_path)
                 except Exception as e:
@@ -1443,6 +1534,34 @@ class ImageProcessor:
             channels = 1 if color_mode == "grayscale" else 3
 
         logger.info(f"Model giriş kanalı: {channels}")
+
+        if normalization not in NORMALIZATION_MODES:
+            logger.warning(f"Bilinmeyen normalizasyon '{normalization}'; 'minus1_1' kullanılacak.")
+            normalization = "minus1_1"
+        _norm_desc = {
+            "minus1_1": "[-1, 1] (tanh)", "zero_1": "[0, 1] (sigmoid)",
+            "raw": "[0, 255] ham", "zscore": "z-skoru (karo bazlı)",
+        }
+        logger.info(f"Karo normalizasyonu: {normalization} -> {_norm_desc[normalization]}")
+
+        # Modelin son katman aktivasyonundan çıkış değer aralığını belirle.
+        # Böylece tahmin -> uint8 dönüşümü her karoda tutarlı olur; karo bazlı
+        # tahmine bağlı yanlış ölçekleme ve dikiş artefaktı önlenir.
+        output_value_mode = None  # "tanh" -> [-1,1], "sigmoid" -> [0,1]
+        try:
+            last_activation = getattr(model.layers[-1], 'activation', None)
+            activation_name = getattr(last_activation, '__name__', '') or ''
+            if activation_name == 'tanh':
+                output_value_mode = 'tanh'
+            elif activation_name in ('sigmoid', 'hard_sigmoid'):
+                output_value_mode = 'sigmoid'
+            if output_value_mode:
+                logger.info(f"Model çıkış aktivasyonu: {activation_name} -> '{output_value_mode}' ölçeği")
+            else:
+                logger.info("Model çıkış aktivasyonu belirlenemedi; değer aralığından tahmin edilecek.")
+        except Exception as e:
+            logger.debug(f"Çıkış aktivasyonu algılanamadı: {e}")
+
         output_files = []
         
         pbar = tqdm(total=len(files), desc="Model inference", unit="görüntü", ncols=100)
@@ -1486,7 +1605,7 @@ class ImageProcessor:
                     pixels = pixels.astype(np.float32)
                     if channels == 1 and pixels.ndim == 2:
                         pixels = np.expand_dims(pixels, axis=-1)
-                    pixels = (pixels - 127.5) / 127.5
+                    pixels = apply_normalization(pixels, normalization)
                     batch_images.append(pixels)
                     valid_indices.append(idx)
                 except Exception as e:
@@ -1511,8 +1630,9 @@ class ImageProcessor:
                 filename = batch_files[file_idx]
                 try:
                     base_name = os.path.splitext(filename)[0]
-                    # Ara ciktilarda kayipli sikistirma kaynakli artefakti azaltmak icin PNG kullan.
-                    output_filename = os.path.join(output_dir, f'goruntu_{base_name}.png')
+                    # Ara çıktılarda kayıplı sıkıştırma artefaktını azaltmak için PNG.
+                    # Karo adı korunur (goruntu_i_j.png); çift önek üretilmez.
+                    output_filename = os.path.join(output_dir, f'{base_name}.png')
 
                     pred = predictions[pred_idx].astype(np.float32)
                     if pred.ndim == 3 and pred.shape[-1] == 1:
@@ -1521,9 +1641,14 @@ class ImageProcessor:
                     pmin = float(np.min(pred))
                     pmax = float(np.max(pred))
 
-                    # Parca bazli dinamik normalize etme dikis artefaktlarini artirir.
-                    # Bu nedenle global sabit olcek kullanilir.
-                    if -1.1 <= pmin and pmax <= 1.1:
+                    # Tahmin -> uint8: önce modelin aktivasyonundan belirlenen
+                    # sabit ölçek; algılanamadıysa değer aralığına göre tahmin.
+                    # Parça bazlı dinamik normalize dikiş artefaktını artırır.
+                    if output_value_mode == 'tanh':
+                        pred_uint8 = np.clip((pred + 1.0) * 127.5, 0, 255).astype(np.uint8)
+                    elif output_value_mode == 'sigmoid':
+                        pred_uint8 = np.clip(pred * 255.0, 0, 255).astype(np.uint8)
+                    elif -1.1 <= pmin and pmax <= 1.1:
                         pred_uint8 = np.clip((pred + 1.0) * 127.5, 0, 255).astype(np.uint8)
                     elif -0.1 <= pmin and pmax <= 1.1:
                         pred_uint8 = np.clip(pred * 255.0, 0, 255).astype(np.uint8)
@@ -1568,7 +1693,9 @@ class ImageProcessor:
         crop_overlap: int = CONFIG["merge"]["crop_overlap"],
         image_size: Tuple[int, int] = CONFIG["pipeline"]["image_size"],
         color_mode: str = CONFIG["pipeline"]["color_mode"],
-        batch_size: int = CONFIG["pipeline"]["batch_size"]
+        batch_size: int = CONFIG["pipeline"]["batch_size"],
+        normalization: str = "minus1_1",
+        auto_reference: bool = True
     ) -> Dict[str, Any]:
         """
         Tüm işlemleri sırayla çalıştırır: Böl -> Model Inference -> Birleştir -> Jeoreferansla
@@ -1622,16 +1749,15 @@ class ImageProcessor:
                     # Metadata varsa yükle
                     if os.path.exists(metadata_path):
                         try:
-                            import json
-                            with open(metadata_path, 'r') as f:
+                            with open(metadata_path, 'r', encoding='utf-8') as f:
                                 metadata = json.load(f)
                             logger.info("=" * 60)
-                            logger.info("1. ADIM: G?r?nt? B?lme (ATLANDI - Klas?r zaten mevcut)")
+                            logger.info("1. ADIM: Görüntü Bölme (ATLANDI - Klasör zaten mevcut)")
                             logger.info("=" * 60)
                             has_new_starts = ('x_starts' in metadata and 'y_starts' in metadata)
                             if has_new_starts:
-                                logger.info(f"? Mevcut klas?r bulundu: {split_output_dir_with_name}")
-                                logger.info(f"? {len(files_in_dir)} par?a mevcut, b?lme i?lemi atlan?yor...")
+                                logger.info(f"✓ Mevcut klasör bulundu: {split_output_dir_with_name}")
+                                logger.info(f"✓ {len(files_in_dir)} parça mevcut, bölme işlemi atlanıyor...")
                                 skip_split = True
 
                                 results['split'] = {
@@ -1643,7 +1769,7 @@ class ImageProcessor:
                             else:
                                 logger.warning(
                                     "Mevcut metadata eski formatta (x_starts/y_starts yok). "
-                                    "Tam kapsama i?in b?lme ad?m? yeniden ?al??t?r?lacak."
+                                    "Tam kapsama için bölme adımı yeniden çalıştırılacak."
                                 )
                         except Exception as e:
                             logger.warning(f"Metadata yüklenemedi, bölme işlemi tekrar yapılacak: {e}")
@@ -1672,13 +1798,7 @@ class ImageProcessor:
                             except Exception as e:
                                 logger.warning(f"Eski parca dosyasi silinemedi ({old_path}): {e}")
 
-                
-                # Coğrafi bilgileri al (eğer mümkünse)
-                try:
-                    gt, px, py = self.get_geotransform(input_image)
-                except:
-                    logger.warning("Coğrafi bilgiler alınamadı, devam ediliyor...")
-                
+                # Coğrafi bilgi (geotransform) split_image içinde metadata'ya yazılır.
                 img_cropped, filenames, metadata = self.split_image(
                     img,
                     tile_size=split_tile_size,
@@ -1686,17 +1806,16 @@ class ImageProcessor:
                     frame_size=split_frame_size,
                     output_dir=split_output_dir_with_name,  # Görüntü adıyla klasör
                     prefix='goruntu',
-                    format='jpg',
+                    format='png',
                     save_metadata=True,
                     original_path=input_image,
                     show_progress=True,
                     keep_in_memory=False  # Pipeline'da RAM tasarrufu
                 )
-                
+
                 # Metadata'yı JSON olarak kaydet
-                import json
                 meta_path = os.path.join(split_output_dir_with_name, 'metadata.json')
-                with open(meta_path, 'w') as f:
+                with open(meta_path, 'w', encoding='utf-8') as f:
                     json.dump(metadata, f, indent=2, default=str)
                 logger.info(f"Metadata kaydedildi: {meta_path}")
                 
@@ -1721,7 +1840,7 @@ class ImageProcessor:
                 if model_dir and os.path.exists(model_dir):
                     # Tüm modelleri işle
                     model_files = [f for f in os.listdir(model_dir) 
-                                  if f.endswith(('.h5', '.keras', '.pb'))]
+                                  if f.endswith(('.h5', '.keras'))]
                     
                     if len(model_files) == 0:
                         logger.warning(f"Model dizininde model dosyası bulunamadı: {model_dir}")
@@ -1744,7 +1863,8 @@ class ImageProcessor:
                                     model_path=model_path_full,
                                     image_size=image_size,
                                     color_mode=color_mode,
-                                    batch_size=batch_size
+                                    batch_size=batch_size,
+                                    normalization=normalization
                                 )
                                 
                                 results['inference'].append({
@@ -1772,7 +1892,8 @@ class ImageProcessor:
                         model_path=model_path,
                         image_size=image_size,
                         color_mode=color_mode,
-                        batch_size=batch_size
+                        batch_size=batch_size,
+                        normalization=normalization
                     )
                     
                     results['inference'].append({
@@ -1811,7 +1932,7 @@ class ImageProcessor:
                     
                     # Çıktı dosya adı
                     base_name = os.path.splitext(os.path.basename(input_image))[0]
-                    merge_output_file = os.path.join(merge_output_dir, f"ana_harita_{base_name}_{model_name}.jpg")
+                    merge_output_file = os.path.join(merge_output_dir, f"ana_harita_{base_name}_{model_name}.png")
                     
                     merged = self.merge_images(
                         input_dir=model_output_dir,
@@ -1837,7 +1958,7 @@ class ImageProcessor:
                 num_frames_y = metadata['num_frames_y']
                 
                 base_name = os.path.splitext(os.path.basename(input_image))[0]
-                merge_output_file = os.path.join(merge_output_dir, f"ana_harita_{base_name}.jpg")
+                merge_output_file = os.path.join(merge_output_dir, f"ana_harita_{base_name}.png")
                 
                 merged = self.merge_images(
                     input_dir=split_output_dir_with_name,  # Görüntü adıyla klasör
@@ -1873,37 +1994,59 @@ class ImageProcessor:
                 except Exception as e:
                     logger.warning(f"Metadata geotransform'u parse edilemedi, referans transform kullanılacak: {e}")
 
+            # Giriş görüntüsünün grid boyutu (transform'u çıktıya doğru ölçeklemek için).
+            input_grid_shape = None
             try:
                 with rasterio.open(input_image) as src_raster:
                     if pipeline_transform is None:
                         pipeline_transform = src_raster.transform
                         logger.info("Jeoreferanslama icin kaynak transform kullanilacak.")
                     pipeline_crs = src_raster.crs
+                    input_grid_shape = (src_raster.height, src_raster.width)
                     if pipeline_crs:
                         logger.info(f"Jeoreferanslama icin kaynak CRS kullanilacak: {pipeline_crs}")
             except Exception as e:
                 logger.warning(f"Kaynak transform/CRS okunamadi, referans bilgileri kullanilacak: {e}")
             
-            # Referans raster'ı bul (görüntü adına göre)
+            # --- Jeoreferanslama kaynağını belirle ---
+            # Öncelik: (1) elle verilen referans raster,
+            #          (2) görüntü adına göre otomatik bulunan referans (auto_reference açıksa),
+            #          (3) giriş görüntüsünün KENDİ coğrafi bilgisi (giriş referanslıysa).
+            input_is_georeferenced = pipeline_crs is not None
             selected_reference = None
+
             if reference_raster and os.path.exists(reference_raster):
                 # Manuel olarak belirtilmiş referans kullan
                 selected_reference = reference_raster
                 logger.info(f"Manuel referans kullanılıyor: {os.path.basename(selected_reference)}")
-            else:
+            elif auto_reference:
                 # Görüntü adına göre referans bul (georeferans_sample klasöründen)
                 selected_reference = self.find_reference_raster(
                     input_image, reference_dir=CONFIG["pipeline"]["reference_dir"]
                 )
-                
-                if not selected_reference:
-                    logger.warning("Referans raster bulunamadı, jeoreferanslama atlanıyor...")
-                    logger.info(
-                        f"Ipucu: Referans raster dosyalarini '{CONFIG['pipeline']['reference_dir']}' klasorune koyun veya reference_raster parametresi ile belirtin."
-                    )
-                else:
+                if selected_reference:
                     logger.info(f"✓ Otomatik referans bulundu: {os.path.basename(selected_reference)}")
-            
+
+            # Ayrı bir referans raster yoksa ve giriş görüntüsü zaten coğrafi
+            # referanslıysa, girişin kendi transform + CRS bilgisini çıktıya uygula.
+            if not selected_reference and input_is_georeferenced:
+                selected_reference = input_image
+                logger.info(
+                    "Ayrı referans raster yok; giriş görüntüsünün kendi coğrafi "
+                    "bilgisi (transform + CRS) çıktıya uygulanacak."
+                )
+
+            if not selected_reference:
+                logger.warning(
+                    "Jeoreferanslama atlanıyor: ne referans raster bulundu ne de "
+                    "giriş görüntüsü coğrafi referanslı."
+                )
+                logger.info(
+                    f"Ipucu: Referans rasterı '{CONFIG['pipeline']['reference_dir']}' "
+                    f"klasörüne koyun, reference_raster ile belirtin ya da coğrafi "
+                    f"referanslı (GeoTIFF) bir giriş görüntüsü kullanın."
+                )
+
             if selected_reference and os.path.exists(selected_reference):
                 # Birleştirilmiş görüntüleri jeoreferansla
                 merge_files = [r['output_file'] for r in results['merge']]
@@ -1936,6 +2079,7 @@ class ImageProcessor:
                             target_transform=pipeline_transform,
                             target_crs=pipeline_crs,
                             force_reference_shape=False,
+                            transform_grid_shape=input_grid_shape,
                         )
                         
                         results['georef'].append({
@@ -1952,9 +2096,8 @@ class ImageProcessor:
                 
                 if TQDM_AVAILABLE:
                     pbar.close()
-            else:
-                logger.info("Referans raster bulunamadı, jeoreferanslama atlanıyor...")
-            
+            # (selected_reference yoksa uyarı yukarıda zaten verildi.)
+
             logger.info("=" * 60)
             logger.info("TÜM İŞLEMLER TAMAMLANDI!")
             logger.info("=" * 60)
@@ -2046,8 +2189,8 @@ Ornekler:
         default=merge_cfg["output"],
         help=f'Cikti dosyasi (varsayilan: {merge_cfg["output"]})'
     )
-    merge_parser.add_argument('--num_frames_x', type=int, help='X eksenindeki parca sayisi')
-    merge_parser.add_argument('--num_frames_y', type=int, help='Y eksenindeki parca sayisi')
+    merge_parser.add_argument('--num_frames_x', type=int, help='Satir sayisi - dikey eksendeki karo sayisi (metadata.json: num_frames_x)')
+    merge_parser.add_argument('--num_frames_y', type=int, help='Sutun sayisi - yatay eksendeki karo sayisi (metadata.json: num_frames_y)')
     merge_parser.add_argument('--crop_overlap', type=int, default=merge_cfg["crop_overlap"], help='Birlestirmede kullanilacak ortusme genisligi')
     merge_parser.add_argument('--tile_size', type=int, default=None, help='Karo boyutu (metadata\'dan okunur)')
     merge_parser.add_argument('--frame_size', type=int, default=None, help='Parca boyutu (metadata\'dan okunur)')
@@ -2148,7 +2291,6 @@ Ornekler:
             )
 
             if args.save_metadata:
-                import json
                 metadata_path = os.path.join(args.output_dir, 'metadata.json')
                 with open(metadata_path, 'w', encoding='utf-8') as f:
                     json.dump(metadata, f, indent=2, default=str)
