@@ -36,6 +36,7 @@ import logging
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Any
 import re
+from datetime import datetime
 
 # ============================================================================
 # MERKEZI YAPILANDIRMA (CONFIG)
@@ -195,6 +196,14 @@ CONFIG = {
         # sadece bu model kullanılır. None ise model_dir kullanılır.
         "model_path": None,
 
+        # Arayuz/pipeline ciktilari icin tek kok klasor.
+        # Varsayilan akis her calistirmayi su agac altinda toplar:
+        #   ciktilar/<goruntu_adi>/run_YYYYMMDD_HHMMSS/
+        #     01_crops/  02_model/  03_merged/  04_georef/
+        # Eski daginik dizin davranisi gerekiyorsa run_full_pipeline icinde
+        # output_root=None verilebilir.
+        "output_root": "ciktilar",
+
         # Bölünmüş karoların kaydedileceği üst klasör.
         # Pipeline görüntü adıyla alt klasör oluşturur:
         #   bolunmus/bolunmus/urgup_bingmap_30cm_utm/
@@ -349,6 +358,29 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+
+
+def _safe_dir_name(name: str, fallback: str = "run") -> str:
+    """Dosya sistemi icin guvenli, okunabilir klasor adi uretir."""
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", str(name or ""))
+    cleaned = re.sub(r"_+", "_", cleaned).strip(" ._")
+    return cleaned or fallback
+
+
+def _unique_dir_path(path: str) -> str:
+    """Var olan klasoru ezmeden benzersiz bir klasor yolu dondurur."""
+    candidate = path
+    index = 1
+    while os.path.exists(candidate):
+        candidate = f"{path}_{index:02d}"
+        index += 1
+    return candidate
+
+
+def _build_pipeline_run_dir(output_root: str, image_name: str, run_name: Optional[str] = None) -> str:
+    run_folder = _safe_dir_name(run_name) if run_name else datetime.now().strftime("run_%Y%m%d_%H%M%S")
+    image_folder = _safe_dir_name(image_name, fallback="girdi")
+    return _unique_dir_path(os.path.join(output_root, image_folder, run_folder))
 
 # TensorFlow/Keras için (opsiyonel - sadece model varsa yüklenecek)
 try:
@@ -1153,7 +1185,22 @@ class ImageProcessor:
             if actual_height != exp_h or actual_width != exp_w:
                 logger.warning(
                     f"Birlestirilmis goruntu boyutu ({actual_height}x{actual_width}) "
-                    f"orijinal boyuttan ({exp_h}x{exp_w}) farkli."
+                    f"orijinal boyuttan ({exp_h}x{exp_w}) farkli. "
+                    "Referans gridini korumak icin cikti orijinal boyuta kirpilacak/padlenecek."
+                )
+                if merged_image.ndim == 2:
+                    aligned = np.zeros((exp_h, exp_w), dtype=merged_image.dtype)
+                else:
+                    aligned = np.zeros((exp_h, exp_w, merged_image.shape[2]), dtype=merged_image.dtype)
+
+                copy_h = min(exp_h, actual_height)
+                copy_w = min(exp_w, actual_width)
+                aligned[:copy_h, :copy_w] = merged_image[:copy_h, :copy_w]
+                merged_image = aligned
+                actual_height, actual_width = merged_image.shape[:2]
+                logger.info(
+                    f"Birlestirilmis goruntu orijinal referans gridine hizalandi: "
+                    f"{actual_height}x{actual_width}"
                 )
         logger.info(f"Birleştirilmiş görüntü boyutu: {actual_height}x{actual_width}")
         
@@ -1750,11 +1797,13 @@ class ImageProcessor:
         split_tile_size: int = CONFIG["pipeline"]["tile_size"],
         split_frame_size: Optional[int] = None,
         split_overlap: int = CONFIG["split"]["overlap"],
-        split_output_dir: str = CONFIG["pipeline"]["split_output_dir"],
-        processed_output_dir: str = CONFIG["pipeline"]["processed_output_dir"],
-        merge_output_dir: str = CONFIG["pipeline"]["merge_output_dir"],
+        split_output_dir: Optional[str] = None,
+        processed_output_dir: Optional[str] = None,
+        merge_output_dir: Optional[str] = None,
         reference_raster: Optional[str] = CONFIG["pipeline"]["reference_raster"],
-        georef_output_dir: str = CONFIG["pipeline"]["georef_output_dir"],
+        georef_output_dir: Optional[str] = None,
+        output_root: Optional[str] = CONFIG["pipeline"]["output_root"],
+        run_name: Optional[str] = None,
         crop_overlap: int = CONFIG["merge"]["crop_overlap"],
         image_size: Tuple[int, int] = CONFIG["pipeline"]["image_size"],
         color_mode: str = CONFIG["pipeline"]["color_mode"],
@@ -1779,6 +1828,8 @@ class ImageProcessor:
             merge_output_dir: Birleştirilmiş görüntülerin dizini
             reference_raster: Jeoreferans için referans raster
             georef_output_dir: Jeoreferanslı görüntülerin dizini
+            output_root: None değilse tüm pipeline çıktıları tek run klasörü altında toplanır
+            run_name: Run klasörü adı. None ise zaman damgası kullanılır
             crop_overlap: Birleştirme sırasında kesilecek örtüşme
             image_size: Model için görüntü boyutu
             color_mode: Model için renk modu ("grayscale" veya "rgb")
@@ -1791,16 +1842,68 @@ class ImageProcessor:
             'split': None,
             'inference': [],
             'merge': [],
-            'georef': []
+            'georef': [],
+            'run_dir': None,
+            'log_file': None,
+            'manifest': None,
+            'output_dirs': {}
         }
-        
+        file_handler = None
+
         try:
             # Görüntü adından klasör adını oluştur
             base_name = os.path.splitext(os.path.basename(input_image))[0]
-            image_folder_name = base_name
-            
-            # Bölünmüş parçalar için klasör yolu (görüntü adıyla)
-            split_output_dir_with_name = os.path.join(split_output_dir, image_folder_name)
+            image_folder_name = _safe_dir_name(base_name, fallback="girdi")
+            explicit_stage_dirs = any([
+                split_output_dir,
+                processed_output_dir,
+                merge_output_dir,
+                georef_output_dir,
+            ])
+            use_run_workspace = bool(output_root) and not explicit_stage_dirs
+
+            if use_run_workspace:
+                run_dir = _build_pipeline_run_dir(output_root, image_folder_name, run_name)
+                split_output_dir_with_name = os.path.join(run_dir, "01_crops")
+                processed_output_dir = os.path.join(run_dir, "02_model")
+                merge_output_dir = os.path.join(run_dir, "03_merged")
+                georef_output_dir = os.path.join(run_dir, "04_georef")
+
+                for stage_dir in [
+                    split_output_dir_with_name,
+                    processed_output_dir,
+                    merge_output_dir,
+                    georef_output_dir,
+                ]:
+                    self.create_output_directory(stage_dir)
+
+                log_file = os.path.join(run_dir, "pipeline.log")
+                file_handler = logging.FileHandler(log_file, encoding="utf-8")
+                file_handler.setFormatter(logging.Formatter(
+                    '%(asctime)s - %(levelname)s - %(message)s',
+                    '%Y-%m-%d %H:%M:%S'
+                ))
+                logger.addHandler(file_handler)
+
+                results['run_dir'] = run_dir
+                results['log_file'] = log_file
+                logger.info(f"Pipeline cikti klasoru: {run_dir}")
+            else:
+                run_dir = None
+                split_output_dir = split_output_dir or CONFIG["pipeline"]["split_output_dir"]
+                processed_output_dir = processed_output_dir or CONFIG["pipeline"]["processed_output_dir"]
+                merge_output_dir = merge_output_dir or CONFIG["pipeline"]["merge_output_dir"]
+                georef_output_dir = georef_output_dir or CONFIG["pipeline"]["georef_output_dir"]
+
+                # Legacy davranis: split/model klasorleri goruntu adiyla alt klasor acardi.
+                split_output_dir_with_name = os.path.join(split_output_dir, image_folder_name)
+
+            results['output_dirs'] = {
+                'crops': split_output_dir_with_name,
+                'model': processed_output_dir,
+                'merged': merge_output_dir,
+                'georef': georef_output_dir,
+            }
             
             # Metadata dosyası yolu
             metadata_path = os.path.join(split_output_dir_with_name, 'metadata.json')
@@ -1921,8 +2024,11 @@ class ImageProcessor:
                             logger.info(f"\nModel işleniyor: {model_name}")
                             
                             try:
-                                # Her model için ayrı çıktı dizini (görüntü adıyla)
-                                model_output_dir = os.path.join(processed_output_dir, image_folder_name, model_name)
+                                # Run workspace'te goruntu adi zaten ust klasorde yer alir.
+                                if use_run_workspace:
+                                    model_output_dir = os.path.join(processed_output_dir, model_name)
+                                else:
+                                    model_output_dir = os.path.join(processed_output_dir, image_folder_name, model_name)
                                 
                                 processed_files = self.process_images_with_model(
                                     input_dir=split_output_dir_with_name,  # Görüntü adıyla klasör
@@ -1953,7 +2059,10 @@ class ImageProcessor:
                     logger.info(f"Model işleniyor: {model_path}")
                     
                     model_name = os.path.splitext(os.path.basename(model_path))[0]
-                    model_output_dir = os.path.join(processed_output_dir, image_folder_name, model_name)
+                    if use_run_workspace:
+                        model_output_dir = os.path.join(processed_output_dir, model_name)
+                    else:
+                        model_output_dir = os.path.join(processed_output_dir, image_folder_name, model_name)
                     
                     processed_files = self.process_images_with_model(
                         input_dir=split_output_dir_with_name,  # Görüntü adıyla klasör
@@ -2053,11 +2162,26 @@ class ImageProcessor:
             logger.info("4. ADIM: Jeoreferanslama")
             logger.info("=" * 60)
 
-            # Mümkünse georeferans için split metadata'daki orijinal geotransform'u kullan.
+            # Jeoreferanslama için mümkünse güncel giriş dosyasının kendi
+            # coğrafi bilgisini kullan. Split klasörü önceden varsa metadata
+            # eski bir koşudan kalmış olabilir; bu yüzden canlı giriş raster'ı
+            # metadata'ya göre daha güvenilir kabul edilir.
             pipeline_transform = None
             pipeline_crs = None
+            input_grid_shape = None
+            try:
+                with rasterio.open(input_image) as src_raster:
+                    pipeline_crs = src_raster.crs
+                    input_grid_shape = (src_raster.height, src_raster.width)
+                    if pipeline_crs:
+                        pipeline_transform = src_raster.transform
+                        logger.info("Jeoreferanslama icin kaynak transform kullanilacak.")
+                        logger.info(f"Jeoreferanslama icin kaynak CRS kullanilacak: {pipeline_crs}")
+            except Exception as e:
+                logger.warning(f"Kaynak transform/CRS okunamadi, metadata/referans bilgileri kullanilacak: {e}")
+
             metadata_geotransform = metadata.get('geotransform') if isinstance(metadata, dict) else None
-            if metadata_geotransform and len(metadata_geotransform) == 6:
+            if pipeline_transform is None and metadata_geotransform and len(metadata_geotransform) == 6:
                 try:
                     gt_vals = tuple(float(v) for v in metadata_geotransform)
                     pipeline_transform = Affine.from_gdal(*gt_vals)
@@ -2065,20 +2189,6 @@ class ImageProcessor:
                 except Exception as e:
                     logger.warning(f"Metadata geotransform'u parse edilemedi, referans transform kullanılacak: {e}")
 
-            # Giriş görüntüsünün grid boyutu (transform'u çıktıya doğru ölçeklemek için).
-            input_grid_shape = None
-            try:
-                with rasterio.open(input_image) as src_raster:
-                    if pipeline_transform is None:
-                        pipeline_transform = src_raster.transform
-                        logger.info("Jeoreferanslama icin kaynak transform kullanilacak.")
-                    pipeline_crs = src_raster.crs
-                    input_grid_shape = (src_raster.height, src_raster.width)
-                    if pipeline_crs:
-                        logger.info(f"Jeoreferanslama icin kaynak CRS kullanilacak: {pipeline_crs}")
-            except Exception as e:
-                logger.warning(f"Kaynak transform/CRS okunamadi, referans bilgileri kullanilacak: {e}")
-            
             # --- Jeoreferanslama kaynağını belirle ---
             # Öncelik: (1) elle verilen referans raster,
             #          (2) görüntü adına göre otomatik bulunan referans (auto_reference açıksa),
@@ -2119,6 +2229,23 @@ class ImageProcessor:
                 )
 
             if selected_reference and os.path.exists(selected_reference):
+                def _same_path(path_a: str, path_b: str) -> bool:
+                    return (
+                        os.path.normcase(os.path.abspath(path_a)) ==
+                        os.path.normcase(os.path.abspath(path_b))
+                    )
+
+                selected_reference_is_input = _same_path(selected_reference, input_image)
+                georef_target_transform = pipeline_transform if selected_reference_is_input else None
+                georef_target_crs = pipeline_crs if selected_reference_is_input else None
+                georef_transform_grid_shape = input_grid_shape if selected_reference_is_input else None
+
+                if not selected_reference_is_input:
+                    logger.info(
+                        "Ayrı referans raster seçildi; çıktı transform/CRS bilgisi "
+                        "referans rasterdan alınacak."
+                    )
+
                 # Birleştirilmiş görüntüleri jeoreferansla
                 merge_files = [r['output_file'] for r in results['merge']]
                 
@@ -2147,10 +2274,10 @@ class ImageProcessor:
                             band=CONFIG["georef"]["band"],
                             compress=CONFIG["georef"]["compress"],
                             nodata=CONFIG["georef"]["nodata"],
-                            target_transform=pipeline_transform,
-                            target_crs=pipeline_crs,
+                            target_transform=georef_target_transform,
+                            target_crs=georef_target_crs,
                             force_reference_shape=False,
-                            transform_grid_shape=input_grid_shape,
+                            transform_grid_shape=georef_transform_grid_shape,
                         )
                         
                         results['georef'].append({
@@ -2169,6 +2296,22 @@ class ImageProcessor:
                     pbar.close()
             # (selected_reference yoksa uyarı yukarıda zaten verildi.)
 
+            if run_dir:
+                manifest_path = os.path.join(run_dir, "run_manifest.json")
+                results['manifest'] = manifest_path
+                manifest = {
+                    'run_dir': run_dir,
+                    'input_image': input_image,
+                    'model_path': model_path,
+                    'model_dir': model_dir,
+                    'reference_raster': reference_raster,
+                    'output_dirs': results['output_dirs'],
+                    'results': results,
+                }
+                with open(manifest_path, 'w', encoding='utf-8') as f:
+                    json.dump(manifest, f, indent=2, default=str)
+                logger.info(f"Run manifest kaydedildi: {manifest_path}")
+
             logger.info("=" * 60)
             logger.info("TÜM İŞLEMLER TAMAMLANDI!")
             logger.info("=" * 60)
@@ -2178,6 +2321,10 @@ class ImageProcessor:
         except Exception as e:
             logger.error(f"Pipeline hatası: {e}", exc_info=True)
             raise
+        finally:
+            if file_handler is not None:
+                logger.removeHandler(file_handler)
+                file_handler.close()
 
 
 def main():
@@ -2298,6 +2445,12 @@ Ornekler:
     pipeline_parser.add_argument('--batch_size', type=int, default=pipeline_cfg["batch_size"], help='Batch boyutu')
     pipeline_parser.add_argument('--reference', default=pipeline_cfg["reference_raster"], help='Referans raster dosyasi')
     pipeline_parser.add_argument('--reference_dir', default=pipeline_cfg["reference_dir"], help='Referans raster dizini')
+    pipeline_parser.add_argument(
+        '--output_root',
+        default=pipeline_cfg["output_root"],
+        help=f'Tum pipeline ciktilarinin toplanacagi kok klasor (varsayilan: {pipeline_cfg["output_root"]}; bos string eski dizinleri kullanir)'
+    )
+    pipeline_parser.add_argument('--run_name', default=None, help='Run klasoru adi (varsayilan: run_YYYYMMDD_HHMMSS)')
 
     # Georef command
     georef_parser = subparsers.add_parser('georef', help='Goruntuyu jeoreferansla')
@@ -2406,11 +2559,9 @@ Ornekler:
                 split_tile_size=args.tile_size,
                 split_frame_size=args.frame_size,
                 split_overlap=args.overlap,
-                split_output_dir=pipeline_cfg["split_output_dir"],
-                processed_output_dir=pipeline_cfg["processed_output_dir"],
-                merge_output_dir=pipeline_cfg["merge_output_dir"],
                 reference_raster=ref_raster,
-                georef_output_dir=pipeline_cfg["georef_output_dir"],
+                output_root=args.output_root or None,
+                run_name=args.run_name,
                 crop_overlap=args.crop_overlap,
                 image_size=pipeline_cfg["image_size"],
                 color_mode=args.color_mode,
@@ -2533,11 +2684,8 @@ if __name__ == "__main__":
                 model_dir=pipeline_cfg["model_dir"] if os.path.exists(pipeline_cfg["model_dir"]) else None,
                 split_frame_size=None,
                 split_overlap=split_cfg["overlap"],
-                split_output_dir=pipeline_cfg["split_output_dir"],
-                processed_output_dir=pipeline_cfg["processed_output_dir"],
-                merge_output_dir=pipeline_cfg["merge_output_dir"],
                 reference_raster=reference_raster,
-                georef_output_dir=pipeline_cfg["georef_output_dir"],
+                output_root=pipeline_cfg["output_root"],
                 crop_overlap=merge_cfg["crop_overlap"],
                 image_size=pipeline_cfg["image_size"],
                 color_mode=pipeline_cfg["color_mode"],
