@@ -21,9 +21,10 @@ import threading
 import traceback
 
 # Tüm göreli yollar (modeller/, georeferans_sample/, bolunmus/ ...) proje
-# köküne göre çözülsün diye çalışma dizinini bu betiğin dizinine sabitle.
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-os.chdir(_SCRIPT_DIR)
+# köküne göre çözülsün diye çalışma dizinini proje köküne sabitle.
+# Bu betik src/ altında olduğundan proje kökü bir üst dizindir.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+os.chdir(_PROJECT_ROOT)
 
 try:
     import gradio as gr

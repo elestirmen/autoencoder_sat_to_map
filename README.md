@@ -297,29 +297,21 @@ urgup_bingmap_30cm_utm.tif          ← Girdi: Ürgüp uydu görüntüsü (~30 c
 Proje iteratif olarak geliştirilmiştir. Dosyalar arasındaki evrimsel ilişki:
 
 ```
-İlk Sürümler (deleted/ klasöründe arşivlenmiş):
-  autoencoder.py, autu_eoncoder_without_gan.py, autoencoder_gun_pure_keras.py
-  goruntu_birlestirme.py, harita_uretici.py, georef_eski_ve_eksik.py
+Eski sürümlerin tamamı arsiv/ klasöründe arşivlenmiştir:
+  - İlk denemeler: autoencoder.py, autu_eoncoder_without_gan.py, ... (Pix2Pix/GAN)
+  - Orta sürümler: goruntu bolme_beta.py, harita_uretici_beta_gpt.py, georef.py
+  - Gelişmiş sürümler: goruntu bolme.py, harita_uretici_beta_gpt_hizli*.py,
+    georef_gpt.py, eski autoencoder_dinamik_bellek* eğitim varyantları
        │
        ▼
-Orta Sürümler (kök dizinde, hâlâ kullanılabilir):
-  goruntu bolme_beta.py ──────── basit karo bölme (prosedürel, tek script)
-  harita_uretici_beta_gpt.py ── basit çıkarım (threading yok)
-  georef.py ───────────────────── basit jeoreferans (hardcoded referans)
-       │
-       ▼
-Gelişmiş Sürümler (kök dizinde, aktif kullanımda):
-  goruntu bolme.py ──────────────── fonksiyonel karo bölme (hata kontrolü, parametrik)
-  harita_uretici_beta_gpt_hizli.py ── threading + çoklu model + paralel çıkarım
-  harita_uretici_beta_gpt_hizli_renkli.py ── renkli varyant
-  harita_uretici_beta_gpt_hizli_3_kanal_to_1_kanal.py ── 3→1 kanal varyant
-  georef_gpt.py ─────────────────── düzenlenmiş jeoreferans (iki aşamalı)
-       │
-       ▼
-Son Sürüm (birleşik, önerilen):
-  goruntu_islemleri.py ──── tüm işlemler tek dosyada, OOP (ImageProcessor sınıfı),
-                            CLI (argparse), otomatik referans seçimi, progress bar,
-                            akıllı bölme atlama, metadata desteği
+Aktif sürümler (kök dizinde src/ ve egitim/ altında):
+  src/goruntu_islemleri.py ── tüm işlemler tek dosyada, OOP (ImageProcessor sınıfı),
+                              CLI (argparse), otomatik referans seçimi, progress bar,
+                              akıllı bölme atlama, metadata desteği
+  src/harita_uretici_arayuz.py ── goruntu_islemleri'yi saran Gradio web arayüzü
+  egitim/autoencoder_unified.py ── birleşik eğitim scripti (CONFIG ile yönetilir)
+  egitim/autoencoder_dinamik_bellek_dosyadan_okuma_tf.data_3_kanal_to_1_kanal.py
+                              ── tf.data tabanlı 3→1 / 1→1 kanal eğitim scripti
 ```
 
 ---
@@ -327,55 +319,40 @@ Son Sürüm (birleşik, önerilen):
 ## 📁 Dizin Yapısı
 
 ```
-AutoEncoder_pix2pix/
+autoencoder_sat_to_map/
 │
-├── 📄 goruntu bolme.py                    # Karo üretimi (544×544 + bindirme)
-├── 📄 goruntu bolme_beta.py               # Karo üretimi (512×512 + bindirme, grid)
-├── 📄 goruntu_islemleri.py                # ⭐ TÜM İŞLEMLERİ TEK DOSYADA (YENİ!)
-│   └── Bölme + Model Inference + Birleştirme + Jeoreferanslama
+├── 📄 README.md
 │
-├── 🧠 Eğitim Scriptleri
-│   ├── autoencoder_dinamik_bellek_dosyadan_okuma_tf.data_renkli.py
-│   │   └── Renkli (3 kanal → 3 kanal) eğitim
-│   └── autoencoder_dinamik_bellek_dosyadan_okuma_tf.data_3_kanal_to_1_kanal.py
-│       └── Gri/tek kanal (3→1 veya 1→1) eğitim
+├── 📂 src/                                # ⭐ Aktif uygulama kodu
+│   ├── goruntu_islemleri.py               # Tüm işlemler tek dosyada:
+│   │                                      #   Bölme + Inference + Birleştirme + Jeoreferans
+│   └── harita_uretici_arayuz.py           # Gradio web arayüzü (goruntu_islemleri'yi sarar)
 │
-├── 🎨 Çıkarım Scriptleri
-│   ├── harita_uretici_beta_gpt_hizli.py                    # Gri/tek-kanal çıkarım
-│   ├── harita_uretici_beta_gpt_hizli_renkli.py            # Renkli çıkarım
-│   └── harita_uretici_beta_gpt_hizli_3_kanal_to_1_kanal.py # RGB → 1 kanal çıkarım
+├── 📂 egitim/                             # 🧠 Model eğitimi ve veri hazırlığı
+│   ├── autoencoder_unified.py             # Birleşik eğitim scripti (CONFIG ile)
+│   ├── autoencoder_dinamik_bellek_dosyadan_okuma_tf.data_3_kanal_to_1_kanal.py
+│   │                                      #   tf.data tabanlı 3→1 / 1→1 kanal eğitim
+│   ├── harita_maske_onisleme.py           # Yan yana görsellerden maske üretimi
+│   ├── on_hazirlik.atn                    # Photoshop ön-hazırlık aksiyonu
+│   └── photosjop_action_on_hazirlik_.atn
 │
-├── 🌍 Jeoreferans Scriptleri
-│   ├── georef_gpt.py
-│   └── georef_gpt-ertugrul.py
+├── 📂 arsiv/                              # 🗄️ Arşivlenmiş eski scriptler (kullanım dışı)
+│   │                                      #   eski bölme/çıkarım/jeoreferans/autoencoder
+│   │                                      #   varyantları + ilk GAN denemeleri
+│   └── temp_dosyalari/                    #   eski geçici dosyalar (csv/txt/xlsx)
 │
-├── 📂 bolunmus/                           # Üretilen karolar
-│   └── bolunmus/                          # (goruntu_islemleri.py için)
-│       └── <görüntü_adı>/                 # Her görüntü için alt klasör
-│           ├── goruntu_0_0.jpg
-│           ├── goruntu_0_1.jpg
-│           └── metadata.json
-│
-├── 📂 modeller/                           # Eğitilmiş Keras modelleri (.h5)
-│
-├── 📂 parcalar/                            # Model'den geçmiş parçalar (goruntu_islemleri.py için)
-│   └── <görüntü_adı>/
-│       └── <model_adı>/
-│
-├── 📂 ana_haritalar/                       # Birleştirilmiş mozaik çıktıları (.jpg)
-│
-├── 📂 georeferans_sample/                  # ⭐ Referans raster dosyaları (YENİ!)
-│   ├── ana_harita_urgup_30_cm__Georefference_utm.tif
-│   └── ana_harita_karlik_30_cm_bingmap_Georeferans.tif
-│
-├── 📂 georefli/                           # Jeoreferanslı GeoTIFF çıktıları
-│   ├── harita/                            # (georef_gpt-ertugrul.py için)
-│   └── harita_temp/                       # (georef_gpt-ertugrul.py için, ara çıktı)
-│
-├── 📂 c:/d_surucusu/parcalar/              # Geçici parça çıktıları (eski scriptler için)
-│
-└── 📂 deleted/                            # Arşivlenmiş eski scriptler
+├── 📂 bolunmus/bolunmus/<görüntü_adı>/    # Üretilen karolar (+ metadata.json)
+├── 📂 modeller/                           # Eğitilmiş Keras modelleri (.h5 / .keras)
+├── 📂 parcalar/<görüntü_adı>/<model_adı>/ # Model'den geçmiş parçalar
+├── 📂 ana_haritalar/                      # Birleştirilmiş mozaik çıktıları (.jpg)
+├── 📂 georeferans_sample/                 # Referans raster dosyaları (.tif)
+└── 📂 georefli/                           # Jeoreferanslı GeoTIFF çıktıları
 ```
+
+> **Not:** `bolunmus/`, `parcalar/`, `ana_haritalar/`, `ciktilar/`, `temp/` gibi
+> klasörler çalışma anında üretilen verilerdir ve `.gitignore` ile depo dışında
+> tutulur. Scriptler proje kökünden çalıştırılmalıdır
+> (ör. `python src/goruntu_islemleri.py ...`); göreli yollar köke göre çözülür.
 
 ---
 
@@ -514,7 +491,7 @@ mkdir modeller
 En basit kullanım -- script içindeki varsayılan değerlerle 4 adımı otomatik çalıştırır:
 
 ```powershell
-python goruntu_islemleri.py
+python src/goruntu_islemleri.py
 ```
 
 Bu komut sırasıyla şunları yapar:
@@ -545,19 +522,19 @@ Tüm adımları parametrelerle kontrol ederek çalıştırır:
 
 ```powershell
 # Varsayılan parametrelerle
-python goruntu_islemleri.py pipeline -i urgup_bingmap_30cm_utm.tif
+python src/goruntu_islemleri.py pipeline -i urgup_bingmap_30cm_utm.tif
 
 # Renkli mod, küçük batch (düşük VRAM'lı GPU için)
-python goruntu_islemleri.py pipeline -i image.tif --color_mode rgb --batch_size 4
+python src/goruntu_islemleri.py pipeline -i image.tif --color_mode rgb --batch_size 4
 
 # Tek model dosyası ile
-python goruntu_islemleri.py pipeline -i image.tif --model_path modeller/model_v2.h5
+python src/goruntu_islemleri.py pipeline -i image.tif --model_path modeller/model_v2.h5
 
 # Manuel referans raster belirterek
-python goruntu_islemleri.py pipeline -i image.tif --reference georeferans_sample/ref.tif
+python src/goruntu_islemleri.py pipeline -i image.tif --reference georeferans_sample/ref.tif
 
 # Tüm parametreleri özelleştirerek
-python goruntu_islemleri.py pipeline \
+python src/goruntu_islemleri.py pipeline \
     -i karlik_30_cm_bingmap_utm.tif \
     --model_dir modeller \
     --frame_size 512 \
@@ -587,16 +564,16 @@ python goruntu_islemleri.py pipeline \
 
 ```powershell
 # Varsayılan parametrelerle
-python goruntu_islemleri.py split
+python src/goruntu_islemleri.py split
 
 # Özelleştirilmiş parametrelerle
-python goruntu_islemleri.py split -i image.tif -o parcalar --frame_size 544 --overlap 32
+python src/goruntu_islemleri.py split -i image.tif -o parcalar --frame_size 544 --overlap 32
 
 # Metadata kaydet ve görselleştir
-python goruntu_islemleri.py split -i image.tif --save_metadata --visualize
+python src/goruntu_islemleri.py split -i image.tif --save_metadata --visualize
 
 # PNG formatında kaydet
-python goruntu_islemleri.py split -i image.tif --format png
+python src/goruntu_islemleri.py split -i image.tif --format png
 ```
 
 **Split parametreleri:**
@@ -616,16 +593,16 @@ python goruntu_islemleri.py split -i image.tif --format png
 
 ```powershell
 # Varsayılan parametrelerle
-python goruntu_islemleri.py merge
+python src/goruntu_islemleri.py merge
 
 # Dizin ve çıktı belirterek
-python goruntu_islemleri.py merge -i parcalar/urgup -o ana_haritalar/merged.jpg
+python src/goruntu_islemleri.py merge -i parcalar/urgup -o ana_haritalar/merged.jpg
 
 # Grid boyutlarını elle belirterek (dikdörtgen haritalar için)
-python goruntu_islemleri.py merge -i parcalar -o merged.jpg --num_frames_x 44 --num_frames_y 60
+python src/goruntu_islemleri.py merge -i parcalar -o merged.jpg --num_frames_x 44 --num_frames_y 60
 
 # Örtüşme kırpması ile
-python goruntu_islemleri.py merge -i parcalar -o merged.jpg --crop_overlap 16
+python src/goruntu_islemleri.py merge -i parcalar -o merged.jpg --crop_overlap 16
 ```
 
 **Merge parametreleri:**
@@ -643,16 +620,16 @@ python goruntu_islemleri.py merge -i parcalar -o merged.jpg --crop_overlap 16
 
 ```powershell
 # Varsayılan dizindeki tüm dosyaları jeoreferansla
-python goruntu_islemleri.py georef
+python src/goruntu_islemleri.py georef
 
 # Tek dosya jeoreferansla
-python goruntu_islemleri.py georef -i ana_haritalar/harita.jpg -r referans.tif -o geo_harita.tif
+python src/goruntu_islemleri.py georef -i ana_haritalar/harita.jpg -r referans.tif -o geo_harita.tif
 
 # Farklı sıkıştırma tipi ile
-python goruntu_islemleri.py georef -i harita.jpg -r referans.tif --compress JPEG
+python src/goruntu_islemleri.py georef -i harita.jpg -r referans.tif --compress JPEG
 
 # NoData değeri belirterek
-python goruntu_islemleri.py georef -i harita.jpg -r referans.tif --nodata 0
+python src/goruntu_islemleri.py georef -i harita.jpg -r referans.tif --nodata 0
 ```
 
 **Georef parametreleri:**
@@ -867,6 +844,10 @@ results = processor.run_full_pipeline(
 
 Büyük `.tif` ortofoto/uydu görselini karolara bölün.
 
+> ⚠️ **Bu bölümdeki scriptler arşivlenmiştir** (`arsiv/`). Güncel ve önerilen yol
+> `src/goruntu_islemleri.py split` komutudur — yukarıdaki "goruntu_islemleri.py
+> Detaylı Kullanım Kılavuzu" bölümüne bakın. Aşağıdaki içerik referans amaçlıdır.
+
 #### Script Seçimi
 
 | Script | Özellikler | Kullanım |
@@ -880,7 +861,7 @@ Büyük `.tif` ortofoto/uydu görselini karolara bölün.
 2. Script'i çalıştırın:
 
 ```powershell
-python "goruntu bolme.py"
+python "arsiv/goruntu bolme.py"
 ```
 
 **Çıktılar:**
@@ -935,7 +916,7 @@ Scriptler bu görüntüyü runtime'da ikiye böler, 544×544'e yeniden boyutland
 **Çalıştırma:**
 
 ```powershell
-python "autoencoder_dinamik_bellek_dosyadan_okuma_tf.data_renkli.py"
+python "arsiv/autoencoder_dinamik_bellek_dosyadan_okuma_tf.data_renkli.py"
 ```
 
 **Çıktılar:**
@@ -969,7 +950,7 @@ python "autoencoder_dinamik_bellek_dosyadan_okuma_tf.data_renkli.py"
 **Çalıştırma:**
 
 ```powershell
-python "autoencoder_dinamik_bellek_dosyadan_okuma_tf.data_3_kanal_to_1_kanal.py"
+python "egitim/autoencoder_dinamik_bellek_dosyadan_okuma_tf.data_3_kanal_to_1_kanal.py"
 ```
 
 **Çıktılar:**
@@ -987,6 +968,9 @@ python "autoencoder_dinamik_bellek_dosyadan_okuma_tf.data_3_kanal_to_1_kanal.py"
 
 #### Çıkarım Scriptleri
 
+> ⚠️ **Bu scriptler arşivlenmiştir** (`arsiv/`). Güncel çıkarım+birleştirme yolu
+> `src/goruntu_islemleri.py` (CLI veya `src/harita_uretici_arayuz.py` web arayüzü).
+
 | Senaryo | Script | Açıklama |
 |---------|--------|----------|
 | **Gri/Tek kanal** | `harita_uretici_beta_gpt_hizli.py` | Tek kanal çıkarım + mozaik birleştirme |
@@ -997,13 +981,13 @@ python "autoencoder_dinamik_bellek_dosyadan_okuma_tf.data_3_kanal_to_1_kanal.py"
 
 ```powershell
 # Gri/tek kanal çıkarım
-python "harita_uretici_beta_gpt_hizli.py"
+python "arsiv/harita_uretici_beta_gpt_hizli.py"
 
 # Renkli çıkarım
-python "harita_uretici_beta_gpt_hizli_renkli.py"
+python "arsiv/harita_uretici_beta_gpt_hizli_renkli.py"
 
 # 3→1 varyantı
-python "harita_uretici_beta_gpt_hizli_3_kanal_to_1_kanal.py"
+python "arsiv/harita_uretici_beta_gpt_hizli_3_kanal_to_1_kanal.py"
 ```
 
 **İşlem Adımları:**
@@ -1032,12 +1016,12 @@ Mozaiklenmiş çıktı `.jpg` dosyalarını bir referans GeoTIFF'in CRS ve trans
 
 ```powershell
 # Tam pipeline ile (otomatik jeoreferanslama dahil)
-python goruntu_islemleri.py
+python src/goruntu_islemleri.py
 
 # Sadece jeoreferanslama
-python goruntu_islemleri.py georef -i image.jpg
+python src/goruntu_islemleri.py georef -i image.jpg
 # Referans otomatik bulunur, veya manuel belirtilebilir:
-python goruntu_islemleri.py georef -i image.jpg -r reference.tif -o geo.tif
+python src/goruntu_islemleri.py georef -i image.jpg -r reference.tif -o geo.tif
 ```
 
 #### Yöntem 2: Eski Script'ler ile
@@ -1057,7 +1041,7 @@ python goruntu_islemleri.py georef -i image.jpg -r reference.tif -o geo.tif
 **Çalıştırma:**
 
 ```powershell
-python "georef_gpt.py"
+python "arsiv/georef_gpt.py"
 # veya
 python "georef_gpt-ertugrul.py"
 ```
@@ -1206,7 +1190,7 @@ mkdir georeferans_sample
 #    veya parametre ile belirtin
 
 # 4. Çalıştırın
-python goruntu_islemleri.py
+python src/goruntu_islemleri.py
 ```
 
 **Çıktılar:**
@@ -1223,7 +1207,7 @@ python goruntu_islemleri.py
 
 ```powershell
 # goruntu bolme.py içinde path değişkenini kaynak TIF'e ayarlayın
-python "goruntu bolme.py"
+python "arsiv/goruntu bolme.py"
 ```
 
 **Çıktı:** 
@@ -1236,7 +1220,7 @@ python "goruntu bolme.py"
 
 ```powershell
 # Veri kökünü eğitim script'inde all_image_paths değişkenine ayarlayın
-python "autoencoder_dinamik_bellek_dosyadan_okuma_tf.data_renkli.py"
+python "arsiv/autoencoder_dinamik_bellek_dosyadan_okuma_tf.data_renkli.py"
 ```
 
 **Çıktı:** `son_model.h5` ve checkpoint'ler
@@ -1247,7 +1231,7 @@ python "autoencoder_dinamik_bellek_dosyadan_okuma_tf.data_renkli.py"
 
 ```powershell
 # Modelleri modeller/ klasörüne koyun
-python "harita_uretici_beta_gpt_hizli.py"
+python "arsiv/harita_uretici_beta_gpt_hizli.py"
 ```
 
 **Çıktılar:**
@@ -1260,7 +1244,7 @@ python "harita_uretici_beta_gpt_hizli.py"
 
 ```powershell
 # Referans raster yolunu script içinde ayarlayın
-python "georef_gpt.py"
+python "arsiv/georef_gpt.py"
 ```
 
 **Çıktılar:**
