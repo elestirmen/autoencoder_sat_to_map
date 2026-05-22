@@ -463,56 +463,101 @@ _THEME = gr.themes.Soft(
 )
 
 _CSS = """
-.gradio-container { max-width: 1240px !important; margin: 0 auto !important; }
+:root { --hm-grad: linear-gradient(135deg, #4f46e5 0%, #7c3aed 52%, #0ea5e9 100%); }
+
+.gradio-container { max-width: 1280px !important; margin: 0 auto !important; }
 
 /* --- Üst başlık --- */
 #app-header {
-    background: linear-gradient(135deg, #4338ca 0%, #6366f1 55%, #0ea5e9 100%);
-    border-radius: 16px; padding: 26px 30px; margin-bottom: 6px;
-    color: #fff; box-shadow: 0 8px 24px rgba(67,56,202,.25);
+    position: relative; overflow: hidden;
+    background: linear-gradient(120deg, #3730a3 0%, #6d28d9 42%, #4f46e5 68%, #0ea5e9 100%);
+    border-radius: 20px; padding: 30px 34px; margin-bottom: 12px;
+    color: #fff; box-shadow: 0 16px 40px -14px rgba(79,70,229,.65);
 }
-#app-header h1 { margin: 0; font-size: 1.7rem; font-weight: 700; letter-spacing: -.01em; }
-#app-header p  { margin: 7px 0 0; opacity: .92; font-size: .95rem; }
+#app-header::after {
+    content:""; position:absolute; right:-70px; top:-90px;
+    width:280px; height:280px; border-radius:50%;
+    background: radial-gradient(circle, rgba(255,255,255,.16), transparent 72%);
+    pointer-events:none;
+}
+#app-header h1 { margin:0; font-size:1.95rem; font-weight:800; letter-spacing:-.02em; }
+#app-header p  { margin:9px 0 0; opacity:.93; font-size:.97rem; max-width:660px; }
 
-/* --- Adım şeridi --- */
-.steps { display:flex; gap:8px; margin-top:16px; flex-wrap:wrap; }
-.step {
-    background: rgba(255,255,255,.16); border:1px solid rgba(255,255,255,.28);
-    border-radius:999px; padding:5px 14px; font-size:.82rem; font-weight:600;
-    backdrop-filter: blur(2px);
+/* --- Adım şeridi (stepper) --- */
+.steps { display:flex; align-items:center; margin-top:22px; flex-wrap:wrap; row-gap:10px; }
+.step { display:flex; align-items:center; gap:8px; font-size:.85rem; font-weight:600; }
+.step + .step::before {
+    content:""; width:30px; height:2px; margin:0 10px;
+    background: rgba(255,255,255,.4); border-radius:2px;
 }
-.step b { opacity:.65; margin-right:5px; }
+.step-num {
+    display:flex; align-items:center; justify-content:center;
+    width:25px; height:25px; border-radius:50%;
+    background: rgba(255,255,255,.20); border:1px solid rgba(255,255,255,.5);
+    font-size:.8rem; font-weight:700;
+}
 
 /* --- Durum rozeti --- */
 .status-badge {
-    display:flex; align-items:center; gap:9px;
-    border:1px solid; border-radius:10px; padding:11px 15px;
-    font-weight:600; font-size:.92rem;
+    display:flex; align-items:center; gap:11px;
+    border:1px solid; border-radius:14px; padding:14px 18px;
+    font-weight:600; font-size:.95rem;
+    box-shadow: 0 4px 14px -8px rgba(15,23,42,.4);
 }
-.status-icon { font-size:1.05rem; line-height:1; }
+.status-icon { font-size:1.15rem; line-height:1; }
 .spin { display:inline-block; animation: spin 1.1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* --- Kartlar --- */
 .panel-card {
     border:1px solid var(--border-color-primary);
-    border-radius:14px !important; padding:16px !important;
-    background: var(--background-fill-secondary);
+    border-radius:16px !important; padding:18px !important;
+    background: var(--background-fill-primary);
+    box-shadow: 0 2px 12px -6px rgba(15,23,42,.18);
+    transition: box-shadow .2s ease;
 }
-.section-title { font-weight:700; font-size:.78rem; letter-spacing:.06em;
-    text-transform:uppercase; opacity:.6; margin:2px 0 4px; }
+.panel-card:hover { box-shadow: 0 10px 28px -12px rgba(79,70,229,.28); }
+
+/* --- Bölüm başlığı (numara rozetli) --- */
+.section-head { display:flex; align-items:center; gap:10px; margin:0 0 6px; }
+.sec-num {
+    display:flex; align-items:center; justify-content:center;
+    width:27px; height:27px; border-radius:9px; flex:none;
+    background: var(--hm-grad); color:#fff;
+    font-weight:800; font-size:.88rem;
+    box-shadow: 0 4px 10px -3px rgba(79,70,229,.55);
+}
+.sec-label { font-weight:700; font-size:1rem; letter-spacing:-.01em; }
 
 /* --- Çalıştır butonu --- */
-#run-btn { font-size:1.02rem !important; font-weight:700 !important; padding:13px !important; }
+#run-btn {
+    font-size:1.08rem !important; font-weight:800 !important;
+    padding:15px !important; border:none !important;
+    background: var(--hm-grad) !important; color:#fff !important;
+    box-shadow: 0 10px 24px -8px rgba(79,70,229,.65) !important;
+    transition: transform .15s ease, box-shadow .15s ease !important;
+}
+#run-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 14px 30px -8px rgba(79,70,229,.75) !important;
+}
+
+/* --- İşlem günlüğü (terminal görünümü) --- */
+#log-box textarea {
+    font-family: ui-monospace, 'Cascadia Code', 'JetBrains Mono', Consolas, monospace !important;
+    font-size:.82rem !important; line-height:1.5 !important;
+    background:#0f172a !important; color:#d1d5db !important;
+    border-radius:12px !important; border-color:#1e293b !important;
+}
 
 /* --- TF uyarısı --- */
 .tf-warning {
     background:#fef3c7; border:1px solid #fcd34d; color:#92400e;
-    border-radius:10px; padding:11px 15px; font-size:.9rem; font-weight:500;
+    border-radius:12px; padding:12px 16px; font-size:.9rem; font-weight:500;
 }
 
 footer { display:none !important; }
-#app-footer { text-align:center; opacity:.55; font-size:.82rem; margin-top:14px; }
+#app-footer { text-align:center; opacity:.5; font-size:.82rem; margin-top:16px; }
 """
 
 _HEADER_HTML = """
@@ -521,10 +566,10 @@ _HEADER_HTML = """
   <p>Bir uydu görüntüsünü otomatik haritaya dönüştürün — bölme, model çıkarımı,
      birleştirme ve jeoreferanslama tek tıkla.</p>
   <div class="steps">
-    <div class="step"><b>1</b>Böl</div>
-    <div class="step"><b>2</b>Modelden Geçir</div>
-    <div class="step"><b>3</b>Birleştir</div>
-    <div class="step"><b>4</b>Jeoreferansla</div>
+    <div class="step"><span class="step-num">1</span>Böl</div>
+    <div class="step"><span class="step-num">2</span>Modelden Geçir</div>
+    <div class="step"><span class="step-num">3</span>Birleştir</div>
+    <div class="step"><span class="step-num">4</span>Jeoreferansla</div>
   </div>
 </div>
 """
@@ -533,6 +578,16 @@ _HEADER_HTML = """
 # ----------------------------------------------------------------------------
 # Arayüzü kur
 # ----------------------------------------------------------------------------
+def _section_title(num, text):
+    """Numara rozetli bölüm başlığı (kart üstlerinde kullanılır)."""
+    return gr.HTML(
+        f'<div class="section-head">'
+        f'<span class="sec-num">{html.escape(str(num))}</span>'
+        f'<span class="sec-label">{html.escape(text)}</span>'
+        f'</div>'
+    )
+
+
 def build_ui():
     with gr.Blocks(title="Harita Üretici") as demo:
         gr.HTML(_HEADER_HTML)
@@ -547,7 +602,7 @@ def build_ui():
             # ---------------- SOL: Girdi & Ayarlar ----------------
             with gr.Column(scale=4):
                 with gr.Group(elem_classes="panel-card"):
-                    gr.Markdown("**📥 Giriş Haritası**", elem_classes="section-title")
+                    _section_title("1", "📥  Giriş Haritası")
                     input_file = gr.File(
                         label="Uydu görüntüsü dosyası",
                         file_types=["image", ".tif", ".tiff"],
@@ -557,24 +612,26 @@ def build_ui():
                     )
 
                 with gr.Group(elem_classes="panel-card"):
-                    gr.Markdown("**🧠 Model & Referans**", elem_classes="section-title")
+                    _section_title("2", "🧠  Model & Referans")
                     model_dd = gr.Dropdown(
                         label="Model",
                         choices=model_choices(),
                         value=default_model(),
                         info="modeller/ klasöründeki .h5 / .keras dosyaları.",
                     )
-                    model_file = gr.File(
-                        label="… veya disk'ten model dosyası seç (.h5 / .keras)",
-                        file_types=[".h5", ".keras"],
-                        file_count="single",
-                        type="filepath",
-                        height=110,
-                    )
-                    gr.Markdown(
-                        "<span style='font-size:.8rem;opacity:.6'>"
-                        "Buraya bir dosya yüklenirse yukarıdaki liste yok sayılır.</span>"
-                    )
+                    with gr.Accordion("📁  Bunun yerine disk'ten model dosyası yükle",
+                                      open=False):
+                        model_file = gr.File(
+                            label="Model dosyası (.h5 / .keras)",
+                            file_types=[".h5", ".keras"],
+                            file_count="single",
+                            type="filepath",
+                            height=110,
+                        )
+                        gr.Markdown(
+                            "<span style='font-size:.8rem;opacity:.6'>"
+                            "Bir dosya yüklenirse yukarıdaki açılır liste yok sayılır.</span>"
+                        )
                     reference_dd = gr.Dropdown(
                         label="Referans raster",
                         choices=reference_choices(),
@@ -582,19 +639,25 @@ def build_ui():
                         info="Jeoreferanslama kaynağı. 'Otomatik' dosya adına göre eşler; "
                              "eşleşme yoksa giriş GeoTIFF ise kendi coğrafi bilgisini kullanır.",
                     )
-                    reference_file = gr.File(
-                        label="… veya disk'ten referans raster seç (.tif / .tiff)",
-                        file_types=[".tif", ".tiff"],
-                        file_count="single",
-                        type="filepath",
-                        height=110,
-                    )
                     gr.Markdown(
                         "<span style='font-size:.8rem;opacity:.6'>"
                         "Giriş görüntüsü coğrafi referanslı bir GeoTIFF ise, ayrı referans "
                         "vermeden de coğrafi bilgisi çıktıya taşınır — boyut biraz değişse "
                         "bile kapsam korunur.</span>"
                     )
+                    with gr.Accordion("📁  Bunun yerine disk'ten referans raster yükle",
+                                      open=False):
+                        reference_file = gr.File(
+                            label="Referans raster (.tif / .tiff)",
+                            file_types=[".tif", ".tiff"],
+                            file_count="single",
+                            type="filepath",
+                            height=110,
+                        )
+                        gr.Markdown(
+                            "<span style='font-size:.8rem;opacity:.6'>"
+                            "Bir dosya yüklenirse yukarıdaki açılır liste yok sayılır.</span>"
+                        )
                     refresh_btn = gr.Button(
                         "🔄  Listeleri Yenile", variant="secondary", size="sm",
                     )
@@ -668,7 +731,7 @@ def build_ui():
                     with gr.Tab("📜  İşlem Günlüğü"):
                         log_box = gr.Textbox(
                             label="Günlük", lines=20, max_lines=20,
-                            interactive=False, autoscroll=True,
+                            interactive=False, autoscroll=True, elem_id="log-box",
                             placeholder="Pipeline çalıştığında günlük burada canlı akar…",
                         )
                     with gr.Tab("💾  Çıktı Dosyaları"):

@@ -52,10 +52,10 @@ from datetime import datetime
 #
 #   Örnek (varsayılan):
 #     tile_size=544 (sabit)       →  model girdisi = 544  ✓ eşleşiyor
-#     overlap=128                 →  örtüşme miktarı
-#     frame_size=416 (hesaplanan) →  416 = 544 - 128      ✓ doğru
-#     crop_overlap=64             →  64*2=128 = overlap   ✓ eşleşiyor
-#     Birleştirme sonrası net karo = 544 - 128 = 416 = frame_size  ✓
+#     overlap=32                  →  örtüşme miktarı
+#     frame_size=512 (hesaplanan) →  512 = 544 - 32       ✓ doğru
+#     crop_overlap=16             →  16*2=32 = overlap    ✓ eşleşiyor
+#     Birleştirme sonrası net karo = 544 - 32 = 512 = frame_size  ✓
 #
 #   DİKKAT: tile_size sabit tutulur (sinir ağı girdisi), frame_size dinamik
 #   olarak hesaplanır. Overlap artırıldığında tile_size değişmez, frame_size
@@ -121,7 +121,7 @@ CONFIG = {
         # İlişki: 
         #   frame_size = tile_size - overlap  (adım boyutu hesaplanır)
         #   crop_overlap = overlap / 2        (birleştirmede her kenardan kırpılır)
-        "overlap": 128,
+        "overlap": 32,
 
         # Dosya adı öneki. Karolar "{prefix}_{satır}_{sütun}.{format}"
         # şeklinde adlandırılır. Örn: goruntu_0_0.jpg, goruntu_3_12.jpg
@@ -166,11 +166,11 @@ CONFIG = {
         # Bölme sırasında eklenen örtüşme (overlap) burada kırpılır.
         # Formül: crop_overlap = overlap / 2
         #
-        #   overlap=128 → crop_overlap=64
-        #   Karo boyutu 544 → 544 - 64*2 = 416 = frame_size  ✓
+        #   overlap=32 → crop_overlap=16
+        #   Karo boyutu 544 → 544 - 16*2 = 512 = frame_size  ✓
         #
         # Bu değer yanlışsa parçalar arası boşluk veya üst üste binme oluşur.
-        "crop_overlap": 64,
+        "crop_overlap": 16,
 
         # Adım boyutu (piksel). Bu değer metadata.json'dan okunur.
         # None ise metadata'dan veya karo boyutundan otomatik hesaplanır.
