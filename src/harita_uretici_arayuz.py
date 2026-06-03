@@ -16,7 +16,9 @@ import os
 import sys
 import html
 import time
+import json
 import logging
+import zipfile
 import threading
 import traceback
 
@@ -33,6 +35,11 @@ except ImportError:
     sys.exit(1)
 
 import cv2
+
+try:
+    import h5py  # model mimarisini tam yükleme yapmadan okumak için
+except Exception:
+    h5py = None
 
 from goruntu_islemleri import ImageProcessor, CONFIG, TENSORFLOW_AVAILABLE
 
@@ -92,6 +99,162 @@ def default_model():
 
 def reference_choices():
     return [REF_AUTO, REF_FROM_INPUT] + list_references()
+
+
+# ----------------------------------------------------------------------------
+# Modelden otomatik algılama
+# Model dosyasını TAM yüklemeden, yalnızca serialize edilmiş mimari config'ini
+# parse eder; kanal sayısı (color_mode), sabit karo boyutu (tile_size) ve çıkış
+# aktivasyonundan (normalizasyon) ilgili ayarları önerir.
+# ----------------------------------------------------------------------------
+def _model_config_dict(path):
+    """Model dosyasından (tam yükleme yapmadan) Keras mimari config'ini çıkarır."""
+    if path.lower().endswith(".keras"):
+        # Keras v3 .keras = zip arşivi; mimari config.json içindedir.
+        with zipfile.ZipFile(path) as zf:
+            with zf.open("config.json") as f:
+                return json.loads(f.read().decode("utf-8"))
+    # .h5: model_config bir HDF5 attribute'unda saklanır.
+    if h5py is None:
+        return None
+    with h5py.File(path, "r") as f:
+        cfg = f.attrs.get("model_config")
+        if cfg is None:
+            return None
+        if isinstance(cfg, bytes):
+            cfg = cfg.decode("utf-8")
+        return json.loads(cfg)
+
+
+def _iter_layer_configs(model_config):
+    """config sözlüğündeki layer tanımlarını sırayla döndürür."""
+    if not isinstance(model_config, dict):
+        return []
+    cfg = model_config.get("config", model_config)
+    layers = cfg.get("layers", []) if isinstance(cfg, dict) else []
+    return layers if isinstance(layers, list) else []
+
+
+def inspect_model_file(path):
+    """Model dosyasından giriş kanalı, sabit karo boyutu ve çıkış aktivasyonunu okur.
+
+    Tam Keras modelini YÜKLEMEDEN sadece mimari config'ini parse eder
+    (.h5 -> h5py attr, .keras -> zip içi config.json). Okunamazsa None döner.
+
+    Returns:
+        {"channels": int|None, "tile_size": int|None, "activation": str|None} | None
+    """
+    try:
+        model_config = _model_config_dict(path)
+        if model_config is None:
+            return None
+
+        layers = _iter_layer_configs(model_config)
+        channels = None
+        tile_size = None
+        activation = None
+
+        # Giriş katmanından kanal ve (varsa) sabit kare boyut.
+        for layer in layers:
+            lcfg = layer.get("config", {}) if isinstance(layer, dict) else {}
+            shape = lcfg.get("batch_input_shape") or lcfg.get("batch_shape")
+            if shape and len(shape) == 4:
+                if shape[-1] in (1, 3):
+                    channels = int(shape[-1])
+                if shape[1] and shape[2] and shape[1] == shape[2]:
+                    tile_size = int(shape[1])
+                break
+
+        # Sondan başlayarak ilk 'activation' alanı = çıkış aktivasyonu.
+        for layer in reversed(layers):
+            lcfg = layer.get("config", {}) if isinstance(layer, dict) else {}
+            act = lcfg.get("activation")
+            if isinstance(act, str):
+                activation = act
+                break
+
+        if channels is None and tile_size is None and activation is None:
+            return None
+        return {"channels": channels, "tile_size": tile_size, "activation": activation}
+    except Exception:
+        return None
+
+
+def _detect_note(kind, message):
+    """Otomatik algılama sonucu için küçük, renk ipuçlu bir not (gr.Markdown güncellemesi)."""
+    if not message:
+        return gr.update(value="")
+    icon = {"idle": "", "done": "✅", "warn": "⚠️", "error": "❌"}.get(kind, "")
+    prefix = f"{icon} " if icon else ""
+    return gr.update(
+        value=f"<span style='font-size:.82rem;opacity:.85'>{prefix}{html.escape(message)}</span>"
+    )
+
+
+def on_model_change(model_choice, model_file):
+    """Model seçimi değişince color_mode / normalizasyon / tile_size'ı modelden önerir.
+
+    Çıkış sırası: color_mode, normalization, tile_size, detect_note (4 değer).
+    Öneridir; kullanıcı açılır listelerden elle ezebilir.
+    """
+    no_change = (gr.update(), gr.update(), gr.update())
+
+    # Aktif model yolunu run_pipeline ile aynı öncelikle çöz: yüklenen dosya > dropdown.
+    path = None
+    mf = (model_file or "").strip().strip('"') if isinstance(model_file, str) else model_file
+    if mf and os.path.isfile(mf) and mf.lower().endswith((".h5", ".keras")):
+        path = mf
+    elif model_choice == MODEL_ALL:
+        return (*no_change, _detect_note(
+            "warn", "Birden fazla model seçili — otomatik algılama atlandı. Ayarları elle kontrol edin."))
+    elif model_choice == MODEL_NONE or not model_choice:
+        return (*no_change, _detect_note("idle", ""))
+    else:
+        candidate = os.path.join(CONFIG["pipeline"]["model_dir"], model_choice)
+        if os.path.isfile(candidate):
+            path = candidate
+
+    if not path:
+        return (*no_change, _detect_note("idle", ""))
+
+    info = inspect_model_file(path)
+    if not info:
+        return (*no_change, _detect_note(
+            "warn", "Model mimarisi okunamadı — color_mode / normalizasyonu elle seçin."))
+
+    parts = []
+    color_update = gr.update()
+    norm_update = gr.update()
+    tile_update = gr.update()
+
+    if info.get("channels") == 1:
+        color_update = gr.update(value="grayscale")
+        parts.append("color_mode → grayscale (1 kanal)")
+    elif info.get("channels") == 3:
+        color_update = gr.update(value="rgb")
+        parts.append("color_mode → rgb (3 kanal)")
+
+    act = (info.get("activation") or "").lower()
+    if act == "tanh":
+        norm_update = gr.update(value="minus1_1")
+        parts.append("normalizasyon → [-1, 1] (tanh)")
+    elif act in ("sigmoid", "hard_sigmoid"):
+        norm_update = gr.update(value="zero_1")
+        parts.append("normalizasyon → [0, 1] (sigmoid)")
+    elif act:
+        parts.append(f"çıkış aktivasyonu '{act}' — normalizasyonu elle seçin")
+
+    if info.get("tile_size"):
+        tile_update = gr.update(value=int(info["tile_size"]))
+        parts.append(f"tile_size → {int(info['tile_size'])}")
+
+    if parts:
+        note = _detect_note(
+            "done", "Modelden algılandı: " + "; ".join(parts) + ". Gerekirse elle değiştirebilirsiniz.")
+    else:
+        note = _detect_note(
+            "warn", "Modelden belirleyici bilgi okunamadı — ayarları elle kontrol edin.")
+    return (color_update, norm_update, tile_update, note)
 
 
 # ----------------------------------------------------------------------------
@@ -252,7 +415,7 @@ def _make_preview(merge_outputs, max_side=1600):
 # ----------------------------------------------------------------------------
 # Ana iş: pipeline'ı çalıştır (canlı log akıtan üreteç)
 # ----------------------------------------------------------------------------
-def run_pipeline(input_path, model_choice, model_file, reference_choice, reference_file,
+def run_pipeline(input_file, input_path_text, model_choice, model_file, reference_choice, reference_file,
                  tile_size, overlap, crop_overlap, batch_size, color_mode,
                  normalization, enhancement, clahe_clip):
     """Pipeline'ı ayrı bir thread'de çalıştırır; logu canlı akıtan generator.
@@ -262,7 +425,13 @@ def run_pipeline(input_path, model_choice, model_file, reference_choice, referen
     run_free = gr.update(interactive=True, value="▶  Pipeline'ı Çalıştır")
     run_busy = gr.update(interactive=False, value="⏳  Çalışıyor…")
 
-    input_path = (input_path or "").strip().strip('"')
+    # Giriş yolunu çöz. Öncelik: yapıştırılan yerel yol > tarayıcıdan yüklenen dosya.
+    # (Büyük GeoTIFF'leri yüklemek pratik olmadığı için yerel yol tercih edilir.)
+    text_path = (input_path_text or "").strip().strip('"')
+    file_path = input_file or ""
+    if isinstance(file_path, str):
+        file_path = file_path.strip().strip('"')
+    input_path = text_path or file_path
 
     # --- Girdi doğrulama ---
     if not input_path:
@@ -289,6 +458,11 @@ def run_pipeline(input_path, model_choice, model_file, reference_choice, referen
     if overlap < 0 or overlap >= tile_size:
         yield ("", _status_html("error",
                f"overlap ({overlap}) 0 ile tile_size ({tile_size}) arasında olmalı."),
+               None, None, run_free)
+        return
+    if crop_overlap < 0 or crop_overlap * 2 >= tile_size:
+        yield ("", _status_html("error",
+               f"crop_overlap ({crop_overlap}) 0 ile tile_size/2 ({tile_size // 2}) arasında olmalı."),
                None, None, run_free)
         return
 
@@ -443,12 +617,27 @@ def clear_all():
     """Arayüzü başlangıç durumuna döndürür."""
     return (
         None,                                  # input file
+        "",                                    # input path text
         None,                                  # model file
         None,                                  # reference file
         "",                                    # log
         _status_html("idle", "Hazır - bir giriş haritası seçin."),
         None,                                  # preview
         None,                                  # downloads
+        _detect_note("idle", ""),              # detect note
+    )
+
+
+def _on_stop():
+    """Durdur butonu: çalışan koşuyu UI seviyesinde iptal eder, run butonunu serbest bırakır.
+
+    NOT: Pipeline ayrı bir daemon thread'de çalıştığı için adım ortasında tam
+    durmaz; arka plandaki işlem mevcut adımı bitirebilir (uygulama kapanınca ölür).
+    Bu buton akışı/anlık görüntülemeyi durdurur ve arayüzü tekrar kullanılabilir yapar.
+    """
+    return (
+        _status_html("warn", "İptal edildi (arka plandaki işlem mevcut adımı bitirebilir)."),
+        gr.update(interactive=True, value="▶  Pipeline'ı Çalıştır"),
     )
 
 
@@ -611,6 +800,12 @@ def build_ui():
                         type="filepath",
                         height=130,
                     )
+                    input_path_text = gr.Textbox(
+                        label="…veya yerel dosya yolu",
+                        placeholder=r"C:\d_surucusu\...\urgup_bingmap_30cm_utm.tif",
+                        info="Büyük GeoTIFF'ler için önerilir (yükleme beklemez). "
+                             "Doldurulursa yukarıdaki yüklenen dosya yok sayılır.",
+                    )
 
                 with gr.Group(elem_classes="panel-card"):
                     _section_title("2", "🧠  Model & Referans")
@@ -633,6 +828,7 @@ def build_ui():
                             "<span style='font-size:.8rem;opacity:.6'>"
                             "Bir dosya yüklenirse yukarıdaki açılır liste yok sayılır.</span>"
                         )
+                    detect_note = gr.Markdown("")
                     reference_dd = gr.Dropdown(
                         label="Referans raster",
                         choices=reference_choices(),
@@ -712,6 +908,7 @@ def build_ui():
 
                 with gr.Row():
                     clear_btn = gr.Button("🧹  Temizle", variant="secondary", scale=1)
+                    stop_btn = gr.Button("⏹  Durdur", variant="stop", scale=1)
                     run_btn = gr.Button(
                         "▶  Pipeline'ı Çalıştır", variant="primary",
                         elem_id="run-btn", scale=2,
@@ -751,12 +948,27 @@ def build_ui():
         gr.HTML('<div id="app-footer">Harita Üretici · goruntu_islemleri.py pipeline arayüzü</div>')
 
         # ---------------- Olay bağlantıları ----------------
-        run_btn.click(
+        run_event = run_btn.click(
             fn=run_pipeline,
-            inputs=[input_file, model_dd, model_file, reference_dd, reference_file,
+            inputs=[input_file, input_path_text, model_dd, model_file, reference_dd, reference_file,
                     tile_size, overlap, crop_overlap, batch_size, color_mode,
                     normalization, enhancement, clahe_clip],
             outputs=[log_box, status_html, preview, downloads, run_btn],
+            concurrency_limit=1,  # Aynı anda tek pipeline: stdout takası/logger çakışmasını önler.
+        )
+        stop_btn.click(
+            fn=_on_stop, inputs=[],
+            outputs=[status_html, run_btn],
+            cancels=[run_event],
+        )
+        # Model seçimi/yüklemesi değişince color_mode/normalizasyon/tile_size'ı modelden öner.
+        model_dd.change(
+            fn=on_model_change, inputs=[model_dd, model_file],
+            outputs=[color_mode, normalization, tile_size, detect_note],
+        )
+        model_file.change(
+            fn=on_model_change, inputs=[model_dd, model_file],
+            outputs=[color_mode, normalization, tile_size, detect_note],
         )
         refresh_btn.click(
             fn=refresh_lists, inputs=[],
@@ -764,8 +976,8 @@ def build_ui():
         )
         clear_btn.click(
             fn=clear_all, inputs=[],
-            outputs=[input_file, model_file, reference_file, log_box,
-                     status_html, preview, downloads],
+            outputs=[input_file, input_path_text, model_file, reference_file, log_box,
+                     status_html, preview, downloads, detect_note],
         )
 
     return demo
