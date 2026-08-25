@@ -1,232 +1,176 @@
-# Uydu Görüntüsünden Harita Üretimi
+# Map Generation from Satellite Imagery
 
-Otoenkoder tabanlı görüntü-görüntü dönüşümü, karo tabanlı büyük raster işleme ve
-GeoTIFF çıktı üretimi için geliştirilen akademik araştırma yazılımı.
+Academic research software developed for autoencoder-based image-to-image translation, large raster processing with tiling, and GeoTIFF output generation.
 
-> **Proje durumu:** Araştırma prototipi. Kod, veri hazırlama, model eğitimi ve
-> çıkarım iş akışını destekler; ancak bu depoda yayımlanmış bir veri kümesi,
-> eğitilmiş model ağırlığı veya nihai başarı tablosu bulunmamaktadır.
+> **Project status:** Research prototype. The code supports the data preparation, model training, and inference workflow; however, this repository does not include a published dataset, trained model weights, or a final benchmark table.
 
-**Hızlı erişim:** [Yöntem](#yöntem-ve-iş-akışı) · [Kurulum](#kurulum) ·
-[Kullanım](#kullanım) · [Çıktılar](#çıktı-yapısı) ·
-[Yeniden üretilebilirlik](#deney-tasarımı-ve-yeniden-üretilebilirlik) ·
-[Değerlendirme](#değerlendirme) · [Atıf](#atıf)
+**Quick access:** [Method](#method-and-workflow) · [Installation](#installation) · [Usage](#usage) · [Outputs](#output-structure) · [Reproducibility](#experimental-design-and-reproducibility) · [Evaluation](#evaluation) · [Citation](#citation)
 
-## Özet
+## Abstract
 
-Bu proje, uydu veya ortofoto görüntülerini kartografik rasterlara ya da nesne
-maskelerine dönüştürmek için denetimli derin öğrenme yaklaşımlarını araştırır.
-Büyük giriş rasteri önce örtüşen karolara ayrılır. Karolar eğitilmiş bir Keras
-modeliyle işlenir, tek bir mozaik hâlinde birleştirilir ve uygun bir mekânsal
-referans mevcutsa GeoTIFF olarak kaydedilir.
+This project investigates supervised deep learning approaches to translate satellite or orthophoto imagery into cartographic rasters or object masks. The large input raster is first divided into overlapping tiles. The tiles are processed with a trained Keras model, reconstructed into a single lossless mosaic, and saved as a GeoTIFF if a suitable spatial reference is available.
 
-Çalışmanın güncel uygulaması dört bileşenden oluşur:
+The current implementation of the study consists of four components:
 
-1. Yan yana eşlenmiş görüntülerden eğitim verisi veya maske hazırlama.
-2. Yapılandırılabilir otoenkoder/U-Net türevlerinin eğitimi.
-3. Büyük rasterlarda karo tabanlı toplu çıkarım ve mozaikleme.
-4. Kaynak ya da referans rasterdan CRS ve dönüşüm bilgisinin aktarılması.
+1. Preparation of training data or masks from side-by-side paired images.
+2. Training of configurable autoencoder/U-Net variants.
+3. Tile-based batch inference and mosaicking on large rasters.
+4. Transfer of CRS and transformation information from a source or reference raster.
 
-**Anahtar kelimeler:** uzaktan algılama, uydu görüntüsü, görüntü-görüntü
-dönüşümü, otoenkoder, U-Net, kartografik genelleştirme, GeoTIFF.
+**Keywords:** remote sensing, satellite imagery, image-to-image translation, autoencoder, U-Net, cartographic generalization, GeoTIFF.
 
-### English abstract
+### Turkish abstract (Türkçe Özet)
 
-This research software investigates supervised image-to-image translation from
-satellite or orthophoto imagery to cartographic rasters and object masks. Large
-rasters are divided into overlapping tiles, processed in batches with a trained
-Keras model, reconstructed as a lossless mosaic, and exported as a
-georeferenced GeoTIFF when a valid spatial reference is available. The
-repository provides data-preparation, training, inference, mosaicking, and
-georeferencing code. It does not currently distribute a dataset, trained
-weights, or peer-reviewed benchmark results.
+Bu araştırma yazılımı, uydu veya ortofoto görüntülerini kartografik rasterlara ya da nesne maskelerine dönüştürmek için denetimli görüntü-görüntü dönüşümü yaklaşımlarını inceler. Büyük rasterlar örtüşen karolara ayrılır, eğitilmiş bir Keras modeliyle işlenir, kayıpsız bir mozaik olarak yeniden birleştirilir ve geçerli bir mekânsal referans varsa GeoTIFF olarak kaydedilir. Depo; veri hazırlama, eğitim, çıkarım, mozaikleme ve jeoreferanslama kodlarını sağlar. Şu anda bir veri kümesi, eğitilmiş ağırlıklar veya hakem denetiminden geçmiş test sonuçları dağıtmamaktadır.
 
-## Araştırma Amacı
+## Research Objective
 
-Temel araştırma sorusu, yüksek çözünürlüklü uydu/ortofoto verisindeki mekânsal
-örüntülerin, piksel düzeyinde kartografik bir gösterime ne ölçüde
-dönüştürülebildiğidir. Depo aşağıdaki deneyleri destekleyecek şekilde
-tasarlanmıştır:
+The main research question is to what extent spatial patterns in high-resolution satellite/orthophoto data can be translated into a pixel-level cartographic representation. The repository is designed to support the following experiments:
 
-- gri tonlu, RGB veya farklı giriş/çıkış kanal kombinasyonları;
-- standart otoenkoderler ile residual U-Net türevlerinin karşılaştırılması;
-- L1, SSIM ve ağırlıklı hibrit kayıp fonksiyonları;
-- boş ya da bilgi içermeyen hedef karoların filtrelenmesi;
-- farklı karo örtüşmesi, normalizasyon ve görüntü iyileştirme ayarları;
-- model çıktısının kayıpsız mozaiklenmesi ve mekânsal referansının korunması.
+- grayscale, RGB, or different input/output channel combinations;
+- comparison of standard autoencoders with residual U-Net variants;
+- L1, SSIM, and weighted hybrid loss functions;
+- filtering of empty or uninformative target tiles;
+- different tile overlap, normalization, and image enhancement settings;
+- lossless mosaicking of model output and preservation of spatial reference.
 
-Kod belirli bir bölgeye sabitlenmemiştir. Bununla birlikte otomatik referans
-eşleştirme sözlüğü şu anda Kapadokya çevresinde kullanılan bazı yer adlarını
-içerir. Yeni çalışma alanları için `CONFIG["reference"]["auto_match_keywords"]`
-listesi genişletilmeli veya referans raster açıkça belirtilmelidir.
+The code is not fixed to a specific region. However, the automatic reference matching dictionary currently includes some place names used around Cappadocia. For new study areas, the `CONFIG["reference"]["auto_match_keywords"]` list should be expanded or the reference raster should be explicitly specified.
 
-## Yöntem ve İş Akışı
+## Method and Workflow
 
 ```mermaid
 flowchart LR
-    A[Uydu veya ortofoto rasteri] --> B[Karo bölme]
-    B --> C[Model çıkarımı]
-    C --> D[Örtüşme kırpma ve mozaikleme]
-    D --> E[CRS ve transform aktarımı]
+    A[Satellite or orthophoto raster] --> B[Tile splitting]
+    B --> C[Model inference]
+    C --> D[Overlap cropping and mosaicking]
+    D --> E[CRS and transform transfer]
     E --> F[GeoTIFF]
-    G[Eşlenmiş uydu ve harita görüntüleri] --> H[Ön işleme]
-    H --> I[tf.data eğitim akışı]
-    I --> J[Keras modeli]
+    G[Paired satellite and map images] --> H[Preprocessing]
+    H --> I[tf.data training pipeline]
+    I --> J[Keras model]
     J --> C
 ```
 
-### 1. Veri hazırlama
+### 1. Data preparation
 
-Eğitim örnekleri tek bir görüntü içinde yatay olarak eşlenmiş olmalıdır:
+Training samples must be paired horizontally within a single image:
 
 ```text
 +----------------------+----------------------+
-| sol: uydu/ortofoto   | sağ: hedef harita    |
+| left: satellite/ortho| right: target map    |
 +----------------------+----------------------+
 ```
 
-`egitim/harita_maske_onisleme.py`, sağ yarıdaki harita bilgisinden siyah nesne
-maskesi üretebilir. `paired` modu uydu ve maskeyi yeniden yan yana kaydeder;
-`mask` modu yalnızca maskeyi kaydeder. Varsayılan ayarlar uydu tarafında
-tekrarlanabilir (`seed=42`) ışık, renk, gölge, gürültü ve bulanıklık
-çeşitlemeleri de üretebilir.
+`egitim/harita_maske_onisleme.py` can generate a black object mask from the map information on the right half. The `paired` mode saves the satellite and mask side-by-side again; the `mask` mode only saves the mask. Default settings can also generate repeatable (`seed=42`) light, color, shadow, noise, and blur variations on the satellite side.
 
-### 2. Eğitim
+### 2. Training
 
-`egitim/autoencoder_unified.py`, eşlenmiş görüntüyü çalışma anında ikiye ayırır,
-girdi ile hedefi `[-1, 1]` aralığına normalize eder ve bir `tf.data` veri hattı
-üzerinden modele verir. Güncel varsayılanlar arasındaki başlıca değerler:
+`egitim/autoencoder_unified.py` splits the paired image in half at runtime, normalizes the input and target to the `[-1, 1]` range, and feeds them to the model via a `tf.data` pipeline. Main values among current defaults:
 
-| Ayar | Varsayılan değer |
+| Setting | Default value |
 |---|---:|
-| Görüntü boyutu | `544 x 544` |
-| Giriş modu | `grayscale` |
-| Çıkış modu | `grayscale` |
+| Image size | `544 x 544` |
+| Input mode | `grayscale` |
+| Output mode | `grayscale` |
 | Model | `classic` |
-| Çıkış aktivasyonu | `elu` |
-| Eğitim/doğrulama oranı | `0.90 / 0.10` |
-| Rastgelelik tohumu | `42` |
-| Batch boyutu | `8` |
-| Epoch | `20` |
-| Optimizasyon | Adam, `1e-3` |
-| Kayıp | `weighted_hybrid` |
+| Output activation | `elu` |
+| Train/validation split | `0.90 / 0.10` |
+| Random seed | `42` |
+| Batch size | `8` |
+| Epochs | `20` |
+| Optimizer | Adam, `1e-3` |
+| Loss | `weighted_hybrid` |
 
-Eğitim yapılandırması bir CLI yerine dosyanın başındaki `Config` sınıfından
-yönetilir. Desteklenen model seçenekleri `unet_residual`, `autoencoder`,
-`autoencoder_backup`, `upsampled`, `advanced`, `gpt`, `gpt_no_reg`, `deneysel`
-ve `classic` değerleridir.
+The training configuration is managed from the `Config` class at the beginning of the file rather than a CLI. Supported model options are `unet_residual`, `autoencoder`, `autoencoder_backup`, `upsampled`, `advanced`, `gpt`, `gpt_no_reg`, `experimental`, and `classic`.
 
-#### Kanal stratejileri
+#### Channel strategies
 
-Giriş ve hedef kanal sayıları birbirinden bağımsız ayarlanabilir:
+Input and target channel numbers can be set independently:
 
-| `COLOR_MODE` | `OUTPUT_COLOR_MODE` | Kullanım |
+| `COLOR_MODE` | `OUTPUT_COLOR_MODE` | Usage |
 |---|---|---|
-| `grayscale` | `grayscale` | Tek kanallı uydu görüntüsünden tek kanallı harita/maske |
-| `rgb` | `rgb` | Renkli uydu görüntüsünden renkli kartografik raster |
-| `rgb` | `grayscale` | Renkli uydu görüntüsünden tek kanallı harita/maske |
-| herhangi biri | `auto` | Çıkış kanalını giriş kanalıyla aynı tutma |
+| `grayscale` | `grayscale` | Single-channel satellite image to single-channel map/mask |
+| `rgb` | `rgb` | Color satellite image to color cartographic raster |
+| `rgb` | `grayscale` | Color satellite image to single-channel map/mask |
+| any | `auto` | Keep output channels the same as input channels |
 
-Kanal stratejisi değiştirildiğinde modelin giriş/çıkış şekli, eğitim verisi ve
-çıkarım ayarı birlikte değiştirilmelidir. Eğitim ve çıkarım arasında kanal veya
-normalizasyon uyuşmazlığı, model dosyası başarıyla yüklense bile anlamsız çıktı
-üretebilir.
+When the channel strategy is changed, the input/output shape of the model, training data, and inference setting must be changed together. A channel or normalization mismatch between training and inference can produce meaningless output even if the model file loads successfully.
 
-#### Amaç fonksiyonu
+#### Objective function
 
-Varsayılan `weighted_hybrid` kaybı, ağırlıklı mutlak hatayı yapısal benzerlik
-kaybıyla birleştirir:
+The default `weighted_hybrid` loss combines weighted absolute error with structural similarity loss:
 
 ```text
 L = 0.8 * [sum_i(w_i * |y_i - y_hat_i|) / sum_i(w_i)]
     + 0.2 * [1 - SSIM(y, y_hat)]
 ```
 
-Varsayılan piksel ağırlıkları açık arka plan için `1`, beyaz olmayan içerik için
-`2`, koyu ayrıntılar için `8` değeridir. Amaç, açık arka planın baskın olduğu
-hedeflerde yol, sınır ve yapı gibi koyu ayrıntıların kayıp içindeki etkisini
-artırmaktır. Bu ağırlıklar veri kümesinden öğrenilmez; deneysel hiperparametre
-olarak raporlanmalı ve ablasyonla sınanmalıdır.
+Default pixel weights are `1` for the light background, `2` for non-white content, and `8` for dark details. The goal is to increase the impact of dark details such as roads, borders, and buildings in targets dominated by a light background. These weights are not learned from the dataset; they should be reported as experimental hyperparameters and tested via ablation.
 
-### 3. Karo tabanlı çıkarım
+### 3. Tile-based inference
 
-Güncel varsayılanlarda `tile_size=544`, `overlap=32` ve dolayısıyla
-`frame_size=512` kullanılır. Birleşim sırasında her kenardan
-`crop_overlap=16` piksel kırpılır. Temel tutarlılık koşulları:
+Current defaults use `tile_size=544`, `overlap=32`, and thus `frame_size=512`. During merging, `crop_overlap=16` pixels are cropped from each edge. Basic consistency conditions:
 
 ```text
 frame_size = tile_size - overlap
 crop_overlap = overlap / 2
-tile_size = modelin beklediği uzamsal girdi boyutu
+tile_size = spatial input size expected by the model
 ```
 
-Karolar PNG olarak kaydedilir. Model kanalı `auto` modunda modelin girdi
-şekline bakılarak belirlenir. Çıkarım normalizasyonu, modelin eğitimde kullandığı
-normalizasyonla aynı olmalıdır; bu projede eğitilen modeller için varsayılan
-`minus1_1` seçeneğidir.
+Tiles are saved as PNG. The model channel in `auto` mode is determined by looking at the input shape of the model. Inference normalization must be the same as the normalization used by the model during training; the default for models trained in this project is the `minus1_1` option.
 
-Başlıca çıkarım seçenekleri:
+Main inference options:
 
-| Parametre | Seçenekler | Açıklama |
+| Parameter | Options | Description |
 |---|---|---|
-| `color_mode` | `auto`, `grayscale`, `rgb` | Model giriş kanalını belirler |
-| Normalizasyon | `minus1_1`, `zero_1`, `raw`, `zscore` | Girdi değer aralığını eğitimle eşler |
-| İyileştirme | `none`, `hist_eq`, `clahe` | Normalizasyondan önce kontrast işlemi uygular |
-| `batch_size` | pozitif tam sayı | Hız ile GPU/RAM tüketimini dengeler |
-| Karo biçimi | PNG | Ara çıktıda kayıplı sıkıştırmayı önler |
+| `color_mode` | `auto`, `grayscale`, `rgb` | Determines the model input channel |
+| Normalization | `minus1_1`, `zero_1`, `raw`, `zscore` | Maps input value range with training |
+| Enhancement | `none`, `hist_eq`, `clahe` | Applies contrast processing before normalization |
+| `batch_size` | positive integer | Balances speed and GPU/RAM consumption |
+| Tile format | PNG | Prevents lossy compression in intermediate output |
 
-Normalizasyon ve görüntü iyileştirme seçeneklerinin tamamı programatik API ve
-grafik arayüzde kullanılabilir. CLI, `color_mode` için varsayılan `auto`
-değerini kullanır; CLI üzerinden açık seçim yapılacaksa mevcut seçenekler
-`grayscale` ve `rgb` ile sınırlıdır.
+All normalization and image enhancement options are available in the programmatic API and graphical interface. The CLI uses the default `auto` value for `color_mode`; if an explicit choice is to be made via the CLI, the available options are limited to `grayscale` and `rgb`.
 
-### 4. Jeoreferanslama
+### 4. Georeferencing
 
-Pipeline mekânsal bilgiyi şu öncelik sırası ile belirler:
+The pipeline determines spatial information with the following priority order:
 
-1. Kullanıcı tarafından verilen referans GeoTIFF.
-2. Dosya adına göre güvenli biçimde eşleşen referans raster.
-3. Coğrafi referanslıysa giriş GeoTIFF'in kendi CRS ve transform bilgisi.
+1. Reference GeoTIFF provided by the user.
+2. Safely matched reference raster by file name.
+3. The input GeoTIFF's own CRS and transform information if it is georeferenced.
 
-Bu kaynakların hiçbiri yoksa mozaik üretilir, fakat jeoreferanslama atlanır.
-Ayrı bir referans kullanıldığında raster kapsamı, piksel boyutu, CRS ve veri
-hizalamasının kullanıcı tarafından doğrulanması gerekir.
+If none of these sources exist, a mosaic is produced, but georeferencing is skipped. When a separate reference is used, raster extent, pixel size, CRS, and data alignment must be verified by the user.
 
-## Depo Yapısı
+## Repository Structure
 
 ```text
 autoencoder_sat_to_map/
 |-- src/
-|   |-- goruntu_islemleri.py       # CLI ve temel işleme sınıfı
-|   `-- harita_uretici_arayuz.py   # Gradio arayüzü
+|   |-- goruntu_islemleri.py       # CLI and core processing class
+|   `-- harita_uretici_arayuz.py   # Gradio interface
 |-- egitim/
-|   |-- autoencoder_unified.py     # Güncel eğitim uygulaması
-|   |-- harita_maske_onisleme.py   # Maske ve eşlenmiş veri üretimi
-|   `-- autoencoder_...py          # Önceki etkin eğitim varyantı
-|-- arsiv/                         # Tarihsel deneyler; ana akış değil
-|-- ciktilar/                      # Pipeline çalışma klasörleri
-|-- ana_haritalar/                 # Eski/manuel mozaik çıktıları
-|-- georefli/                      # Eski/manuel GeoTIFF çıktıları
+|   |-- autoencoder_unified.py     # Current training implementation
+|   |-- harita_maske_onisleme.py   # Mask and paired data generation
+|   `-- autoencoder_...py          # Previously active training variants
+|-- arsiv/                         # Historical experiments; not mainline
+|-- ciktilar/                      # Pipeline working directories
+|-- ana_haritalar/                 # Old/manual mosaic outputs
+|-- georefli/                      # Old/manual GeoTIFF outputs
 `-- README.md
 ```
 
-`arsiv/` altındaki betikler deney geçmişini korumak amacıyla tutulur. Yeni
-çalışmalarda `src/goruntu_islemleri.py`, `src/harita_uretici_arayuz.py` ve
-`egitim/autoencoder_unified.py` esas alınmalıdır.
+Scripts under `arsiv/` are kept to preserve the experiment history. For new work, `src/goruntu_islemleri.py`, `src/harita_uretici_arayuz.py`, and `egitim/autoencoder_unified.py` should be the basis.
 
-## Kurulum
+## Installation
 
-### Gereksinimler
+### Requirements
 
-- Python 3.10 önerilir.
-- Model eğitimi/çıkarımı için TensorFlow 2.x.
-- GeoTIFF işlemleri için Rasterio ve GDAL uyumlu sistem kütüphaneleri.
-- GPU kullanılacaksa TensorFlow, CUDA, cuDNN ve ekran kartı sürücüsü birbirleriyle
-  uyumlu olmalıdır.
+- Python 3.10 recommended.
+- TensorFlow 2.x for model training/inference.
+- Rasterio and GDAL-compatible system libraries for GeoTIFF operations.
+- If using a GPU, TensorFlow, CUDA, cuDNN, and the graphics card driver must be compatible with each other.
 
-Depoda henüz sabitlenmiş bir `requirements.txt` veya `environment.yml`
-bulunmadığından, aşağıdaki kurulum bir başlangıç ortamıdır; yayımlanacak
-deneylerde tam paket sürümleri ayrıca kaydedilmelidir.
+Since there is no pinned `requirements.txt` or `environment.yml` in the repository yet, the installation below is a starting environment; exact package versions should be recorded separately in published experiments.
 
 ```powershell
 conda create -n sat2map python=3.10 -y
@@ -235,38 +179,34 @@ conda install -c conda-forge numpy opencv matplotlib natsort tqdm rasterio affin
 pip install tensorflow gradio
 ```
 
-Histogram eşitlemeli eğitim modu kullanılacaksa TensorFlow sürümüyle uyumlu bir
-`tensorflow-addons` kurulumu da gerekir:
+If the histogram equalization training mode is used, a `tensorflow-addons` installation compatible with the TensorFlow version is also required:
 
 ```powershell
 pip install tensorflow-addons
 ```
 
-Kurulumu kaydetmek için:
+To save the installation:
 
 ```powershell
 python --version
 python -m pip freeze > environment-lock.txt
 ```
 
-`environment-lock.txt` yerel deney kaydıdır; mevcut `.gitignore` yapısı
-nedeniyle depoya otomatik olarak eklenmeyebilir.
+`environment-lock.txt` is a local experiment record; it may not be automatically added to the repository due to the current `.gitignore` structure.
 
-## Kullanım
+## Usage
 
-Tüm komutlar depo kök dizininden çalıştırılmalıdır.
+All commands must be run from the repository root directory.
 
-### Grafik arayüz
+### Graphical Interface
 
 ```powershell
 python src/harita_uretici_arayuz.py
 ```
 
-Arayüz; girdi rasteri, model, referans raster, karo boyutu, örtüşme,
-normalizasyon ve batch boyutunun seçilmesini sağlar. Çalışma günlüğü ile üretilen
-mozaik ve GeoTIFF dosyaları aynı arayüzden izlenebilir.
+The interface allows the selection of input raster, model, reference raster, tile size, overlap, normalization, and batch size. The run log and generated mosaic and GeoTIFF files can be monitored from the same interface.
 
-### Tek modelle tam pipeline
+### Full Pipeline with a Single Model
 
 ```powershell
 python src/goruntu_islemleri.py pipeline `
@@ -276,12 +216,9 @@ python src/goruntu_islemleri.py pipeline `
   --run_name "deney_001"
 ```
 
-Bu örnekte `modeller/tek_model/` dizini yalnızca çalıştırılacak `.h5` veya
-`.keras` dosyasını içermelidir. Geçerli bir `--model_dir` varsa uygulama bu
-dizini `--model_path` seçeneğinden önce işler. `--reference` verilmezse otomatik
-referans seçimi ve ardından giriş GeoTIFF'in kendi mekânsal bilgisi denenir.
+In this example, the `modeller/tek_model/` directory should only contain the `.h5` or `.keras` file to be run. If there is a valid `--model_dir`, the application processes this directory before the `--model_path` option. If `--reference` is not provided, automatic reference selection and then the input GeoTIFF's own spatial information are tried.
 
-### Bir dizindeki tüm modellerle çıkarım
+### Inference with All Models in a Directory
 
 ```powershell
 python src/goruntu_islemleri.py pipeline `
@@ -291,10 +228,10 @@ python src/goruntu_islemleri.py pipeline `
   --batch_size 8
 ```
 
-### Adımları ayrı çalıştırma
+### Running Steps Separately
 
 ```powershell
-# Karo üretimi
+# Tile generation
 python src/goruntu_islemleri.py split `
   --input "veri/girdi.tif" `
   --output_dir "calisma/karolar" `
@@ -303,12 +240,12 @@ python src/goruntu_islemleri.py split `
   --format png `
   --save_metadata
 
-# Metadata ile mozaikleme
+# Mosaicking with metadata
 python src/goruntu_islemleri.py merge `
   --input_dir "calisma/karolar" `
   --output "calisma/mozaik.png"
 
-# Mozaiği GeoTIFF'e dönüştürme
+# Converting mosaic to GeoTIFF
 python src/goruntu_islemleri.py georef `
   --input "calisma/mozaik.png" `
   --reference "veri/referans.tif" `
@@ -316,7 +253,7 @@ python src/goruntu_islemleri.py georef `
   --compress LZW
 ```
 
-Tüm CLI seçenekleri:
+All CLI options:
 
 ```powershell
 python src/goruntu_islemleri.py --help
@@ -326,7 +263,7 @@ python src/goruntu_islemleri.py merge --help
 python src/goruntu_islemleri.py georef --help
 ```
 
-### Maske ve eşlenmiş eğitim verisi üretimi
+### Mask and Paired Training Data Generation
 
 ```powershell
 python egitim/harita_maske_onisleme.py `
@@ -337,39 +274,33 @@ python egitim/harita_maske_onisleme.py `
   --save_preview 10
 ```
 
-`strict` profil daha düşük yanlış-pozitif oranı hedefleyen daha katı morfolojik
-eşikler kullanır. Bu ön işleme, klasik görüntü işleme eşiklerine dayalıdır;
-farklı harita stilleri ve renk paletleri için görsel kontrol ve parametre
-kalibrasyonu gerekir.
+The `strict` profile uses stricter morphological thresholds aiming for a lower false-positive rate. This preprocessing is based on classic image processing thresholds; visual inspection and parameter calibration are required for different map styles and color palettes.
 
-### Model eğitimi
+### Model Training
 
-1. `egitim/autoencoder_unified.py` içindeki `Config.DATA_DIR`, kanal modu, model,
-   kayıp fonksiyonu ve eğitim hiperparametrelerini deney protokolüne göre ayarlayın.
-2. Eşlenmiş görüntülerin sol yarıda girdi, sağ yarıda hedef içerdiğini doğrulayın.
-3. Eğitimi başlatın:
+1. Adjust `Config.DATA_DIR`, channel mode, model, loss function, and training hyperparameters in `egitim/autoencoder_unified.py` according to the experiment protocol.
+2. Verify that paired images contain the input on the left half and the target on the right half.
+3. Start training:
 
 ```powershell
 python egitim/autoencoder_unified.py
 ```
 
-Her epoch için checkpoint ve eğitim sonunda `son_model.h5` üretilir. Var olan
-bir modeli devam ettirmek için `Config.PRETRAINED_MODEL` açıkça ayarlanmalıdır.
+A checkpoint is generated for each epoch and `son_model.h5` at the end of training. To resume an existing model, `Config.PRETRAINED_MODEL` must be explicitly set.
 
-## Asgari Yeniden Üretilebilir Deney
+## Minimal Reproducible Experiment
 
-Bir deneyi yalnızca çalıştırmak değil, sonradan denetlenebilir kılmak için şu
-asgari kayıt akışı önerilir:
+To make an experiment not only runnable but also verifiable later, the following minimal recording flow is recommended:
 
 ```powershell
-# 1. Kod sürümünü kaydet
+# 1. Save code version
 git rev-parse HEAD
 
-# 2. Ortamı kaydet
+# 2. Save environment
 python --version
 python -m pip freeze > environment-lock.txt
 
-# 3. Benzersiz adla çıkarımı çalıştır
+# 3. Run inference with a unique name
 python src/goruntu_islemleri.py pipeline `
   --input "veri/test_bolge_01.tif" `
   --model_dir "modeller/deney_001" `
@@ -377,157 +308,124 @@ python src/goruntu_islemleri.py pipeline `
   --run_name "deney_001_test_bolge_01"
 ```
 
-Çalışma tamamlandıktan sonra şu kontroller yapılmalıdır:
+After the run is complete, the following checks should be made:
 
-1. `run_manifest.json` içindeki girdi, model ve çıktı yolları doğru mu?
-2. `pipeline.log` içinde hata, atlanan karo veya başarısız model var mı?
-3. `metadata.json` içindeki karo sayısı ile model çıktı sayısı eşit mi?
-4. Mozaikte boşluk, tekrar veya dikiş artefaktı var mı?
-5. GeoTIFF CRS'i, sınırları ve piksel boyutu kaynak rasterla uyumlu mu?
-6. Nicel değerlendirme yalnızca daha önce görülmemiş coğrafi test alanında mı
-   hesaplandı?
+1. Are the input, model, and output paths in `run_manifest.json` correct?
+2. Are there any errors, skipped tiles, or failed models in `pipeline.log`?
+3. Is the tile count in `metadata.json` equal to the model output count?
+4. Are there any gaps, repetitions, or seam artifacts in the mosaic?
+5. Do the GeoTIFF CRS, bounds, and pixel size match the source raster?
+6. Was the quantitative evaluation calculated only on a previously unseen geographical test area?
 
-### Sık karşılaşılan sorunlar
+### Common Issues
 
-| Belirti | Kontrol/çözüm |
+| Symptom | Check/solution |
 |---|---|
-| Rasterio veya GDAL kurulumu başarısız | Aynı ortamda `conda-forge` paketlerini kullanın; `pip` ve Conda GDAL kurulumlarını gelişigüzel karıştırmayın. |
-| Model yüklenemiyor | TensorFlow/Keras sürümünü, `.h5` için HDF5 desteğini ve özel kayıp fonksiyonlarını kontrol edin. Pipeline bazı eski `Conv2DTranspose` yapılandırmaları için uyumluluk katmanı içerir. |
-| Çıktı tamamen açık, koyu veya bozuk | Eğitimdeki kanal modu, `tile_size`, normalizasyon ve çıktı aktivasyonunu çıkarım ayarlarıyla karşılaştırın. |
-| Renkler ters görünüyor | OpenCV'nin BGR, model hattının RGB kullandığını doğrulayın; araya eklenen özel ön işleme kodunu denetleyin. |
-| Karo birleşimi kaymış veya dikişli | `metadata.json` dosyasını koruyun ve `crop_overlap = overlap / 2` koşulunu doğrulayın. |
-| GPU belleği yetersiz | Önce `batch_size` değerini düşürün; bilimsel kapsamı veya karo örneklerini azaltmadan tekrar çalıştırın. |
-| GeoTIFF yanlış konumda | Referans rasterin doğru bölgeye, CRS'e, kapsama ve çözünürlüğe ait olduğunu bağımsız olarak doğrulayın. |
+| Rasterio or GDAL installation fails | Use `conda-forge` packages in the same environment; do not mix `pip` and Conda GDAL installations haphazardly. |
+| Model cannot be loaded | Check TensorFlow/Keras version, HDF5 support for `.h5`, and custom loss functions. The pipeline includes a compatibility layer for some older `Conv2DTranspose` configurations. |
+| Output is completely light, dark, or corrupted | Compare channel mode, `tile_size`, normalization, and output activation in training with inference settings. |
+| Colors look inverted | Verify that OpenCV uses BGR and the model pipeline uses RGB; check any custom preprocessing code inserted. |
+| Tile merge is shifted or seamed | Keep the `metadata.json` file and verify the `crop_overlap = overlap / 2` condition. |
+| GPU memory insufficient | First lower `batch_size`; rerun without reducing scientific scope or tile samples. |
+| GeoTIFF in wrong location | Independently verify that the reference raster belongs to the correct region, CRS, extent, and resolution. |
 
-## Çıktı Yapısı
+## Output Structure
 
-Varsayılan tam pipeline, önceki sonuçları ezmemek için zaman damgalı bir çalışma
-dizini oluşturur:
+The default full pipeline creates a timestamped working directory to avoid overwriting previous results:
 
 ```text
-ciktilar/<girdi_adi>/run_YYYYMMDD_HHMMSS/
+ciktilar/<input_name>/run_YYYYMMDD_HHMMSS/
 |-- 01_crops/
-|   |-- goruntu_<satir>_<sutun>.png
+|   |-- goruntu_<row>_<col>.png
 |   `-- metadata.json
-|-- 02_model/<model_adi>/
-|   |-- goruntu_<satir>_<sutun>.png
+|-- 02_model/<model_name>/
+|   |-- goruntu_<row>_<col>.png
 |   `-- metadata.json
 |-- 03_merged/
-|   `-- ana_harita_<girdi>_<model>.png
+|   `-- ana_harita_<input>_<model>.png
 |-- 04_georef/
-|   `-- ana_harita_<girdi>_<model>_geo.tif
+|   `-- ana_harita_<input>_<model>_geo.tif
 |-- pipeline.log
 `-- run_manifest.json
 ```
 
-`metadata.json` karo ızgara bilgilerini; `pipeline.log` işlem günlüğünü;
-`run_manifest.json` ise girdi, model, referans ve üretilen dosya yollarını
-kaydeder. Akademik arşivlemede bu üç dosya model ağırlığı ve ortam dökümüyle
-birlikte korunmalıdır.
+`metadata.json` records tile grid information; `pipeline.log` the process log; and `run_manifest.json` the input, model, reference, and generated file paths. In academic archiving, these three files should be preserved along with model weights and environment dumps.
 
-## Deney Tasarımı ve Yeniden Üretilebilirlik
+## Experimental Design and Reproducibility
 
-Yayımlanabilir bir deney için en az aşağıdaki bilgiler raporlanmalıdır:
+For a publishable experiment, at least the following information should be reported:
 
-- depo commit kimliği (`git rev-parse HEAD`) ve Python/paket sürümleri;
-- veri kaynağı, lisansı, tarih aralığı, coğrafi kapsam ve yer örnekleme mesafesi;
-- eğitim, doğrulama ve test bölgelerinin dosya listeleri;
-- model tipi, giriş/çıkış kanalları, normalizasyon, kayıp ve tüm hiperparametreler;
-- `tile_size`, `overlap`, `crop_overlap`, batch boyutu ve çıkarım donanımı;
-- referans rasterin CRS'i, transformu ve çıktının mekânsal kapsam kontrolü;
-- rastgelelik tohumları, checkpoint seçim ölçütü ve durdurma kuralı;
-- nicel metrikler ile nitel hata örnekleri.
+- repository commit ID (`git rev-parse HEAD`) and Python/package versions;
+- data source, license, date range, geographical extent, and ground sampling distance;
+- file lists of training, validation, and test areas;
+- model type, input/output channels, normalization, loss, and all hyperparameters;
+- `tile_size`, `overlap`, `crop_overlap`, batch size, and inference hardware;
+- CRS and transform of the reference raster, and spatial extent check of the output;
+- random seeds, checkpoint selection criteria, and stopping rule;
+- quantitative metrics and qualitative error examples.
 
-Güncel eğitim kodu dosyaları `seed=42` ile karıştırıp rastgele yüzde 90/10
-bölmektedir. Komşu karolar aynı sahneden geldiği için bu yöntem mekânsal veri
-sızıntısına ve iyimser doğrulama sonucuna yol açabilir. Nihai deneylerde eğitim,
-doğrulama ve test kümeleri dosya bazında değil, birbirinden ayrık coğrafi bloklar
-veya bölgeler bazında oluşturulmalıdır.
+Current training code files shuffle with `seed=42` and randomly split 90/10. Since neighboring tiles come from the same scene, this method can lead to spatial data leakage and optimistic validation results. In final experiments, training, validation, and test sets should not be created file by file, but based on disjoint geographical blocks or regions.
 
-TensorFlow için yalnızca NumPy tohumu ayarlanması tam deterministik çalışma
-garantisi vermez. Kesin yeniden üretim gerekiyorsa Python, NumPy ve TensorFlow
-tohumları birlikte sabitlenmeli, uygun deterministik işlem seçenekleri
-etkinleştirilmeli ve GPU/yazılım sürümleri raporlanmalıdır.
+For TensorFlow, setting only the NumPy seed does not guarantee a fully deterministic run. If exact reproduction is required, Python, NumPy, and TensorFlow seeds must be pinned together, appropriate deterministic operation options must be enabled, and GPU/software versions must be reported.
 
-## Değerlendirme
+## Evaluation
 
-Depoda şu anda otomatik bir test veya benchmark modülü bulunmamaktadır. Bu
-nedenle README herhangi bir modelin bilimsel olarak daha iyi olduğunu ya da
-belirli bir başarı düzeyine ulaştığını iddia etmez.
+There is currently no automated testing or benchmark module in the repository. Therefore, the README does not claim that any model is scientifically better or achieves a specific level of success.
 
-Amaca göre önerilen raporlama seti:
+Recommended reporting set based on purpose:
 
-| Çıktı türü | Nicel ölçütler | Ek kontrol |
+| Output type | Quantitative metrics | Additional check |
 |---|---|---|
-| Sürekli/kartografik raster | MAE, RMSE, SSIM, PSNR | Kenar ve ince çizgi korunumu |
-| İkili nesne maskesi | Precision, recall, F1, IoU | Nesne boyutuna göre hata |
-| Jeoreferanslı sonuç | metre cinsinden konum hatası | CRS, kapsam ve piksel boyutu |
-| Sistem performansı | karo/s, toplam süre, tepe bellek | CPU/GPU ve batch bilgisi |
+| Continuous/cartographic raster | MAE, RMSE, SSIM, PSNR | Edge and thin line preservation |
+| Binary object mask | Precision, recall, F1, IoU | Error by object size |
+| Georeferenced result | location error in meters | CRS, extent, and pixel size |
+| System performance | tiles/s, total time, peak memory | CPU/GPU and batch info |
 
-Metrikler görüntü ortalaması yanında sahne/bölge bazında da verilmeli; merkezi
-eğilimle birlikte dağılım, güven aralığı ve aykırı örnekler raporlanmalıdır.
+Metrics should be given per scene/region in addition to the image average; distribution, confidence interval, and outliers should be reported along with central tendency.
 
-### Sonuç tablosu şablonu
+### Result table template
 
-README'ye veya bir makalenin ek materyaline sonuç eklenirken boş ya da
-doğrulanmamış hücreler başarı iddiasıyla doldurulmamalıdır. Aşağıdaki yapı,
-modellerin aynı test protokolü altında karşılaştırılmasını sağlar:
+When adding results to the README or supplementary material of a paper, empty or unverified cells should not be filled with success claims. The following structure allows models to be compared under the same test protocol:
 
-| Deney | Eğitim bölgeleri | Test bölgesi | Model | Girdi/çıktı | SSIM veya IoU | MAE veya F1 | Süre (s) | Not |
+| Experiment | Training regions | Test region | Model | In/Out | SSIM or IoU | MAE or F1 | Time (s) | Note |
 |---|---|---|---|---|---:|---:|---:|---|
-| `exp_001` | `<bölgeler>` | `<ayrık bölge>` | `<model>` | `1→1` | `<değer>` | `<değer>` | `<değer>` | `<donanım>` |
+| `exp_001` | `<regions>` | `<disjoint region>` | `<model>` | `1→1` | `<value>` | `<value>` | `<value>` | `<hardware>` |
 
-Her tabloyla birlikte test örneği sayısı, metrik yönü, hesaplama ölçeği,
-checkpoint seçim kuralı ve kullanılan commit kimliği verilmelidir.
+Along with each table, the number of test samples, metric direction, calculation scale, checkpoint selection rule, and the commit ID used should be provided.
 
-## Bilinen Sınırlılıklar
+## Known Limitations
 
-- Veri kümesi ve eğitilmiş modeller bu depoya dâhil değildir; ayrıca temin
-  edilmeleri gerekir.
-- Bağımlılık sürümleri henüz kilitlenmemiştir.
-- Eğitim yapılandırması CLI veya deney YAML'i yerine Python sınıfı içindedir.
-- Varsayılan eğitim/doğrulama bölmesi mekânsal bloklamalı değildir.
-- Otomatik referans seçimi dosya adı anahtar kelimelerine dayanır.
-- Jeoreferanslama semantik veya geometrik kayıt hatasını otomatik ölçmez.
-- Arayüzde durdurma, çalışan görevi iptal eder; kısmi çıktıların tamlığı ayrıca
-  kontrol edilmelidir.
-- Araştırma kodu için birim ve entegrasyon testleri henüz eklenmemiştir.
+- The dataset and trained models are not included in this repository; they must be obtained separately.
+- Dependency versions are not yet pinned.
+- Training configuration is inside a Python class rather than a CLI or experiment YAML.
+- The default train/validation split is not spatially blocked.
+- Automatic reference selection relies on filename keywords.
+- Georeferencing does not automatically measure semantic or geometric registration error.
+- Stopping from the interface cancels the running task; completeness of partial outputs must be verified separately.
+- Unit and integration tests for the research code have not been added yet.
 
-## Veri, Etik ve Kullanım Koşulları
+## Data, Ethics, and Terms of Use
 
-Uydu, ortofoto ve çevrim içi harita verileri farklı telif, lisans, atıf ve
-yeniden dağıtım koşullarına tabi olabilir. Kullanıcı, veri sağlayıcısının
-koşullarını incelemekten; eğitim ve türetilmiş çıktıların paylaşım hakkını
-doğrulamaktan; hassas konum veya kişisel veri riski varsa uygun önlemleri
-almaktan sorumludur.
+Satellite, orthophoto, and online map data may be subject to different copyright, licensing, attribution, and redistribution conditions. The user is responsible for reviewing the data provider's terms; verifying the right to share training and derived outputs; and taking appropriate measures if there is a risk involving sensitive locations or personal data.
 
-Üretilen haritalar insan denetimi olmadan navigasyon, afet yönetimi, kadastro,
-güvenlik veya diğer yüksek riskli operasyonel kararlarda kullanılmamalıdır.
+The generated maps should not be used in navigation, disaster management, cadastre, security, or other high-risk operational decisions without human supervision.
 
-## Atıf
+## Citation
 
-Bu depo için henüz bir `CITATION.cff`, DOI veya yayına ait kesin bibliyografik
-kayıt bulunmamaktadır. Akademik kullanımda en azından depo adresi ve kullanılan
-commit kimliği belirtilmelidir:
+There is no `CITATION.cff`, DOI, or definitive bibliographic record for a publication for this repository yet. In academic use, at least the repository URL and the commit ID used should be stated:
 
 ```text
-autoencoder_sat_to_map. Uydu görüntüsünden harita üretimi araştırma yazılımı.
-https://github.com/elestirmen/autoencoder_sat_to_map, erişim tarihi: YYYY-AA-GG,
-commit: <git rev-parse HEAD çıktısı>.
+autoencoder_sat_to_map. Map generation from satellite imagery research software.
+https://github.com/elestirmen/autoencoder_sat_to_map, accessed: YYYY-MM-DD,
+commit: <git rev-parse HEAD output>.
 ```
 
-Bir makale veya veri yayınıyla eşleşecek resmî atıf bilgisi eklendiğinde bu
-bölüm güncellenmelidir.
+This section should be updated when formal citation information matching a paper or data publication is added.
 
-## Lisans
+## License
 
-Depoda şu anda bir `LICENSE` dosyası yoktur. Açık bir lisans verilmediği sürece
-kaynak kodun yeniden kullanımı, değiştirilmesi veya dağıtımı için otomatik izin
-varsayılmamalıdır. Akademik paylaşımdan önce uygun bir yazılım lisansı ve veri
-lisansı açıkça eklenmelidir.
+There is currently no `LICENSE` file in the repository. Unless an explicit license is provided, automatic permission for reuse, modification, or distribution of the source code should not be assumed. A suitable software license and data license must be explicitly added before academic sharing.
 
-## Katkı
+## Contributing
 
-Hata bildirimleri ve katkılar GitHub issue veya pull request üzerinden
-iletilebilir. Bilimsel davranışı değiştiren katkıların veri bölme protokolü,
-parametreler, beklenen çıktı ve doğrulama kanıtıyla birlikte sunulması önerilir.
+Bug reports and contributions can be submitted via GitHub issues or pull requests. It is recommended that contributions altering scientific behavior be submitted along with the data split protocol, parameters, expected output, and validation evidence.
