@@ -426,7 +426,7 @@ This section should be updated when formal citation information matching a paper
 
 ## License
 
-There is currently no `LICENSE` file in the repository. Unless an explicit license is provided, automatic permission for reuse, modification, or distribution of the source code should not be assumed. A suitable software license and data license must be explicitly added before academic sharing.
+This project is dual-licensed under the MIT License and Apache License 2.0.
 
 ## Contributing
 

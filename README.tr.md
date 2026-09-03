@@ -533,10 +533,7 @@ bölüm güncellenmelidir.
 
 ## Lisans
 
-Depoda şu anda bir `LICENSE` dosyası yoktur. Açık bir lisans verilmediği sürece
-kaynak kodun yeniden kullanımı, değiştirilmesi veya dağıtımı için otomatik izin
-varsayılmamalıdır. Akademik paylaşımdan önce uygun bir yazılım lisansı ve veri
-lisansı açıkça eklenmelidir.
+Bu proje MIT Lisansı ve Apache Lisansı 2.0 altında çift lisanslıdır.
 
 ## Katkı
 
