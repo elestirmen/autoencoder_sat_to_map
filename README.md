@@ -73,7 +73,7 @@ Training samples must be paired horizontally within a single image:
 | Input mode | `grayscale` |
 | Output mode | `grayscale` |
 | Model | `classic` |
-| Output activation | `elu` |
+| Output activation | `tanh` |
 | Train/validation split | `0.90 / 0.10` |
 | Random seed | `42` |
 | Batch size | `8` |
@@ -81,7 +81,9 @@ Training samples must be paired horizontally within a single image:
 | Optimizer | Adam, `1e-3` |
 | Loss | `weighted_hybrid` |
 
-The training configuration is managed from the `Config` class at the beginning of the file rather than a CLI. Supported model options are `unet_residual`, `autoencoder`, `autoencoder_backup`, `upsampled`, `advanced`, `gpt`, `gpt_no_reg`, `experimental`, and `classic`.
+The training configuration is managed from the `Config` class at the beginning of the file rather than a CLI. Supported model options are `unet_residual`, `autoencoder`, `autoencoder_backup`, `upsampled`, `advanced`, `gpt`, `gpt_no_reg`, `deneysel`, `classic`, and `flat_bottleneck`. Code comments describe `flat_bottleneck` as the shallow architecture class that reached `success_25m = 0.70` in an internal benchmark; this figure has not been independently reproduced or documented in this repository and should be re-verified before being cited.
+
+`OUTPUT_ACTIVATION` (`tanh` or `sigmoid`) fixes the value range training labels must be normalized to: `tanh` expects labels in `[-1, 1]`, `sigmoid` expects `[0, 1]`. `validate_activation_contract()` fails fast if the activation and the label range disagree, but this is a training-time check only — the corresponding input normalization for inference must still be set manually (see [Tile-based inference](#3-tile-based-inference)).
 
 #### Channel strategies
 
@@ -204,7 +206,7 @@ All commands must be run from the repository root directory.
 python src/harita_uretici_arayuz.py
 ```
 
-The interface allows the selection of input raster, model, reference raster, tile size, overlap, normalization, and batch size. The run log and generated mosaic and GeoTIFF files can be monitored from the same interface.
+The interface allows the selection of input raster, model, reference raster, tile size, overlap, normalization, image enhancement (histogram equalization or CLAHE), and batch size. The run log and generated mosaic and GeoTIFF files can be monitored from the same interface.
 
 ### Full Pipeline with a Single Model
 

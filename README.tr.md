@@ -103,7 +103,7 @@ girdi ile hedefi `[-1, 1]` aralığına normalize eder ve bir `tf.data` veri hat
 | Giriş modu | `grayscale` |
 | Çıkış modu | `grayscale` |
 | Model | `classic` |
-| Çıkış aktivasyonu | `elu` |
+| Çıkış aktivasyonu | `tanh` |
 | Eğitim/doğrulama oranı | `0.90 / 0.10` |
 | Rastgelelik tohumu | `42` |
 | Batch boyutu | `8` |
@@ -113,8 +113,19 @@ girdi ile hedefi `[-1, 1]` aralığına normalize eder ve bir `tf.data` veri hat
 
 Eğitim yapılandırması bir CLI yerine dosyanın başındaki `Config` sınıfından
 yönetilir. Desteklenen model seçenekleri `unet_residual`, `autoencoder`,
-`autoencoder_backup`, `upsampled`, `advanced`, `gpt`, `gpt_no_reg`, `deneysel`
-ve `classic` değerleridir.
+`autoencoder_backup`, `upsampled`, `advanced`, `gpt`, `gpt_no_reg`, `deneysel`,
+`classic` ve `flat_bottleneck` değerleridir. Kod içi yorumlar, `flat_bottleneck`
+mimarisini iç bir kıyaslamada `success_25m = 0.70` değerine ulaşan sığ mimari
+sınıfı olarak tanımlar; bu değer bu depoda bağımsız olarak yeniden üretilmemiş
+veya belgelenmemiştir ve atıfta bulunulmadan önce yeniden doğrulanmalıdır.
+
+`OUTPUT_ACTIVATION` (`tanh` veya `sigmoid`), eğitim etiketlerinin
+normalize edilmesi gereken değer aralığını sabitler: `tanh` etiketlerin
+`[-1, 1]` aralığında olmasını, `sigmoid` ise `[0, 1]` aralığında olmasını
+bekler. `validate_activation_contract()`, aktivasyon ile etiket aralığı
+uyuşmadığında hatayı erken verir; ancak bu yalnızca eğitim zamanı kontrolüdür
+— çıkarım için karşılık gelen girdi normalizasyonu yine de elle ayarlanmalıdır
+(bkz. [Karo tabanlı çıkarım](#3-karo-tabanlı-çıkarım)).
 
 #### Kanal stratejileri
 
@@ -263,8 +274,9 @@ python src/harita_uretici_arayuz.py
 ```
 
 Arayüz; girdi rasteri, model, referans raster, karo boyutu, örtüşme,
-normalizasyon ve batch boyutunun seçilmesini sağlar. Çalışma günlüğü ile üretilen
-mozaik ve GeoTIFF dosyaları aynı arayüzden izlenebilir.
+normalizasyon, görüntü iyileştirme (histogram eşitleme veya CLAHE) ve batch
+boyutunun seçilmesini sağlar. Çalışma günlüğü ile üretilen mozaik ve GeoTIFF
+dosyaları aynı arayüzden izlenebilir.
 
 ### Tek modelle tam pipeline
 

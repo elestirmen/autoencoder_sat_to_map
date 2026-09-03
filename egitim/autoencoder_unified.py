@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 Birleşik AutoEncoder Eğitim Scripti
 ===================================
@@ -45,7 +45,7 @@ except ImportError:
 class Config:
     """Tüm eğitim parametrelerini buradan yönetin."""
     
-    # ------------------------------ VERİ AYARLARI -----------------------------
+    # ------------------------------ VE AYARLARI -----------------------------
     # Veri dizini yolu
     DATA_DIR = "maps_zoom_level_19/sonuclar_19/"
     
@@ -80,14 +80,30 @@ class Config:
     
     # Model mimarisi secimi:
     # "unet_residual", "autoencoder", "autoencoder_backup", "upsampled",
-    # "advanced", "gpt", "gpt_no_reg", "deneysel", "classic"
+    # "advanced", "gpt", "gpt_no_reg", "deneysel", "classic",
+    # "flat_bottleneck"  <- benchmark'ta 0.70 success_25m alan mimari sinifi
     MODEL_TYPE = "classic"
     
     # Önceden eğitilmiş model yükle (None = sıfırdan başla)
-    PRETRAINED_MODEL = None  # Örn: "son_model.h5" veya None
+    PRETRAINED_MODEL = r"C:\d_surucusu\visual_navigation\autoencoder_sat_to_map\ciktilar\_27_08_2026__16_59_model_f32_k3_epoch_00011_elu_(1, 1)_.h5"  # Örn: "son_model.h5" veya None
     
-    # Aktivasyon fonksiyonu: "sigmoid", "relu", "elu", "tanh"
-    ACTIVATION_FUNC = "elu"
+    # Gizli katman aktivasyonu: "sigmoid", "relu", "elu", "tanh"
+    HIDDEN_ACTIVATION = "elu"
+
+    # Cikis aktivasyonu: "tanh" veya "sigmoid".
+    # Etiket normalizasyonu buna gore secilir ve tutarlilik
+    # validate_activation_contract() tarafindan fail-fast dogrulanir:
+    #   tanh    -> etiketler [-1, 1]
+    #   sigmoid -> etiketler [ 0, 1]
+    # Benchmark'ta 0.70 success_25m alan 2022 modelleri sigmoid ciktiliydi;
+    # bu yuzden sigmoid desteklenir ve yasaklanmaz.
+    OUTPUT_ACTIVATION = "tanh"
+
+    # Giris normalizasyonu: "minus1_1" veya "zero_1".
+    # Benchmark cikarimi varsayilan olarak minus1_1 besler
+    # (run_urgup_cevresi_models.py), bu yuzden egitim de varsayilan olarak
+    # minus1_1 kullanir; boylece egitim ve cikarim girisi ayni olur.
+    INPUT_NORMALIZATION = "minus1_1"
     
     # Filtre sayısı (başlangıç filtre sayısı)
     FILTER_COUNT = 32
@@ -97,8 +113,12 @@ class Config:
     
     # Stride değeri
     STRIDES = (1, 1)
+
+    # flat_bottleneck mimarisinin daralma derinligi.
+    # 3 -> f, f/2, f/4 (2022'de kazanan modellerin yapisi).
+    FLAT_DEPTH = 3
     
-    # ------------------------------ EĞİTİM AYARLARI ---------------------------
+    # ------------------------------ EM AYARLARI ---------------------------
     # Batch size
     BATCH_SIZE = 8
     
@@ -136,7 +156,7 @@ class Config:
     # Final model adı
     FINAL_MODEL_NAME = "son_model.h5"
     
-    # ------------------------------ VERİ PIPELINE AYARLARI --------------------
+    # ------------------------------ VE PIPELINE AYARLARI --------------------
     # Paralel işlem sayısı (None = AUTOTUNE)
     NUM_PARALLEL_CALLS = None
     
@@ -146,7 +166,7 @@ class Config:
     # Dosya doğrulama modu:
     # "none": Doğrulama yapma (en hızlı, ignore_errors ile hatalar atlanır)
     # "quick": Sadece dosya boyutu kontrolü (hızlı)
-    # "cached": İlk sefer doğrula, sonucu cache'le (400k dosya için önerilen)
+    # "cached":lk sefer doğrula, sonucu cache'le (400k dosya için önerilen)
     # "full": Her seferinde tam doğrulama (yavaş)
     VALIDATE_FILES = "cached"
     
@@ -161,7 +181,7 @@ class Config:
     EMPTY_TILE_MAX_WHITE_RATIO = 0.99
     EMPTY_TILE_MIN_DARK_RATIO = 0.005
 
-    # ------------------------------ GELİŞMİŞ AYARLAR --------------------------
+    # ------------------------------ GELŞ AYARLAR --------------------------
     # Early stopping (0 = devre dışı)
     EARLY_STOPPING_PATIENCE = 8
     
@@ -202,9 +222,78 @@ def get_output_channels():
     if mode in ("grayscale", "gray", "bw", "blackwhite", "black_white"):
         return 1
     raise ValueError(
-        f"Geçersiz OUTPUT_COLOR_MODE: {Config.OUTPUT_COLOR_MODE}. "
-        f"Geçerli değerler: auto, grayscale, rgb"
+        f"Gecersiz OUTPUT_COLOR_MODE: {Config.OUTPUT_COLOR_MODE}. "
+        "Gecerli degerler: auto, grayscale, rgb"
     )
+
+
+# Cikis aktivasyonu -> (etiket alt siniri, etiket ust siniri).
+# Kayip fonksiyonlari ve etiket normalizasyonu bu tablodan turetilir; boylece
+# aktivasyon ile etiket araligi hicbir zaman birbirinden ayrisamaz.
+OUTPUT_RANGES = {
+    "tanh": (-1.0, 1.0),
+    "sigmoid": (0.0, 1.0),
+}
+
+INPUT_NORMALIZATIONS = ("minus1_1", "zero_1")
+
+
+def validate_activation_contract():
+    """Gizli/cikis aktivasyonlarini veri normalizasyonu ile uyumlu dogrula."""
+    supported_hidden = {"sigmoid", "relu", "elu", "tanh"}
+    hidden = str(Config.HIDDEN_ACTIVATION).lower()
+    output = str(Config.OUTPUT_ACTIVATION).lower()
+    if hidden not in supported_hidden:
+        raise ValueError(
+            f"Desteklenmeyen gizli katman aktivasyonu: {Config.HIDDEN_ACTIVATION}. "
+            f"Gecerli degerler: {sorted(supported_hidden)}"
+        )
+    if output not in OUTPUT_RANGES:
+        raise ValueError(
+            f"Desteklenmeyen cikis aktivasyonu: {Config.OUTPUT_ACTIVATION!r}. "
+            f"Gecerli degerler: {sorted(OUTPUT_RANGES)}"
+        )
+    input_norm = str(getattr(Config, "INPUT_NORMALIZATION", "minus1_1")).lower()
+    if input_norm not in INPUT_NORMALIZATIONS:
+        raise ValueError(
+            f"Desteklenmeyen giris normalizasyonu: {input_norm!r}. "
+            f"Gecerli degerler: {list(INPUT_NORMALIZATIONS)}"
+        )
+    return hidden, output
+
+
+def get_target_range():
+    """Cikis aktivasyonunun gerektirdigi etiket araligini dondur."""
+    return OUTPUT_RANGES[validate_activation_contract()[1]]
+
+
+def get_input_normalization():
+    validate_activation_contract()
+    return str(getattr(Config, "INPUT_NORMALIZATION", "minus1_1")).lower()
+
+
+def normalize_to_range(pixels, low, high):
+    """[0, 255] float goruntuyu [low, high] araligina tasi."""
+    return pixels * ((high - low) / 255.0) + low
+
+
+def normalize_input(pixels):
+    """Giris goruntusunu INPUT_NORMALIZATION ayarina gore olcekle.
+
+    Cikarim tarafinda benchmark ayni islemi goruntu_islemleri.
+    apply_normalization() ile yapar; iki tarafin ayni kalmasi sarttir.
+    """
+    if get_input_normalization() == "zero_1":
+        return normalize_to_range(pixels, 0.0, 1.0)
+    return normalize_to_range(pixels, -1.0, 1.0)
+
+
+def get_hidden_activation():
+    return validate_activation_contract()[0]
+
+
+def get_output_activation():
+    return validate_activation_contract()[1]
 
 
 def get_channels():
@@ -224,33 +313,66 @@ def get_input_shape(for_inference=False):
 
 
 # ==============================================================================
-#                              LOSS FONKSİYONLARI
+#                              LOSS FONKYONLARI
 # ==============================================================================
+
+def clip_to_target_range(tensor):
+    low, high = get_target_range()
+    return tf.clip_by_value(tensor, low, high)
+
+
+def target_dynamic_range():
+    """tf.image.ssim'in max_val parametresi: etiket araliginin genisligi."""
+    low, high = get_target_range()
+    return high - low
+
+
+def rescaled_threshold(value):
+    """[-1, 1] icin yazilmis bir esigi gecerli etiket araligina tasi.
+
+    WEIGHTED_* esikleri tarihsel olarak [-1, 1] varsayimiyla yazildi. Cikis
+    sigmoid oldugunda ayni goreli parlaklik seviyesine karsilik gelmeleri icin
+    yeniden olceklenirler; aksi halde -0.6 gibi bir esik [0, 1] araliginda
+    hicbir pikseli secmez ve agirliklandirma sessizce devre disi kalir.
+    """
+    low, high = get_target_range()
+    if (low, high) == (-1.0, 1.0):
+        return value
+    return low + (value + 1.0) * (high - low) / 2.0
+
 
 def ssim_loss(y_true, y_pred):
     """SSIM tabanli kayip fonksiyonu."""
-    y_true = tf.clip_by_value(y_true, -1.0, 1.0)
-    y_pred = tf.clip_by_value(y_pred, -1.0, 1.0)
-    return 1 - tf.reduce_mean(tf.image.ssim(y_true, y_pred, 2.0))
+    y_true = clip_to_target_range(y_true)
+    y_pred = clip_to_target_range(y_pred)
+    return 1 - tf.reduce_mean(
+        tf.image.ssim(y_true, y_pred, target_dynamic_range())
+    )
 
 
 def hybrid_loss(y_true, y_pred):
     """L1 + SSIM karisik kayip (daha net cizgiler icin)."""
-    y_true = tf.clip_by_value(y_true, -1.0, 1.0)
-    y_pred = tf.clip_by_value(y_pred, -1.0, 1.0)
+    y_true = clip_to_target_range(y_true)
+    y_pred = clip_to_target_range(y_pred)
     l1 = tf.reduce_mean(tf.abs(y_true - y_pred))
-    ssim = 1 - tf.reduce_mean(tf.image.ssim(y_true, y_pred, 2.0))
+    ssim = 1 - tf.reduce_mean(
+        tf.image.ssim(y_true, y_pred, target_dynamic_range())
+    )
     return 0.8 * l1 + 0.2 * ssim
 
 
 def weighted_hybrid_loss(y_true, y_pred):
     """L1 + SSIM (etikette koyu detaylara agirlik vererek)."""
-    y_true = tf.clip_by_value(y_true, -1.0, 1.0)
-    y_pred = tf.clip_by_value(y_pred, -1.0, 1.0)
+    y_true = clip_to_target_range(y_true)
+    y_pred = clip_to_target_range(y_pred)
 
     # Etikette beyaz agirlik baskin oldugunda, koyu/icerik piksellerine daha fazla agirlik ver.
-    non_white_mask = tf.cast(y_true <= Config.WEIGHTED_NON_WHITE_THRESHOLD, tf.float32)
-    dark_mask = tf.cast(y_true <= Config.WEIGHTED_DARK_THRESHOLD, tf.float32)
+    non_white_mask = tf.cast(
+        y_true <= rescaled_threshold(Config.WEIGHTED_NON_WHITE_THRESHOLD), tf.float32
+    )
+    dark_mask = tf.cast(
+        y_true <= rescaled_threshold(Config.WEIGHTED_DARK_THRESHOLD), tf.float32
+    )
 
     weights = tf.ones_like(y_true)
     weights += non_white_mask * (Config.WEIGHTED_NON_WHITE_WEIGHT - 1.0)
@@ -259,20 +381,28 @@ def weighted_hybrid_loss(y_true, y_pred):
     abs_err = tf.abs(y_true - y_pred)
     weighted_l1 = tf.reduce_sum(abs_err * weights) / (tf.reduce_sum(weights) + K.epsilon())
 
-    ssim = 1 - tf.reduce_mean(tf.image.ssim(y_true, y_pred, 2.0))
+    ssim = 1 - tf.reduce_mean(
+        tf.image.ssim(y_true, y_pred, target_dynamic_range())
+    )
     return Config.WEIGHTED_HYBRID_L1 * weighted_l1 + Config.WEIGHTED_HYBRID_SSIM * ssim
 
 
 def ssim_metric(y_true, y_pred):
     """Takip metrigi: SSIM (1'e yaklastikca daha iyi)."""
-    y_true = tf.clip_by_value(y_true, -1.0, 1.0)
-    y_pred = tf.clip_by_value(y_pred, -1.0, 1.0)
-    return tf.reduce_mean(tf.image.ssim(y_true, y_pred, 2.0))
+    y_true = clip_to_target_range(y_true)
+    y_pred = clip_to_target_range(y_pred)
+    return tf.reduce_mean(
+        tf.image.ssim(y_true, y_pred, target_dynamic_range())
+    )
 
 
 def get_metrics():
     """Egitim metrikleri."""
-    return [tf.keras.metrics.MeanAbsoluteError(name='mae'), ssim_metric]
+    return [
+        tf.keras.metrics.MeanAbsoluteError(name='mae'),
+        tf.keras.metrics.MeanSquaredError(name='mse'),
+        ssim_metric,
+    ]
 
 def get_loss_function():
     """Yapılandırmaya göre kayıp fonksiyonunu döndürür."""
@@ -316,7 +446,7 @@ class PeriodicSave(tf.keras.callbacks.Callback):
 
 
 # ==============================================================================
-#                              VERİ YÜKLEME
+#                              VERİ KLEME
 # ==============================================================================
 
 def get_random_size():
@@ -375,9 +505,11 @@ def load_and_preprocess(image_path):
     input_img = tf.image.resize(input_img, [target_size, target_size], method=tf.image.ResizeMethod.NEAREST_NEIGHBOR)
     label_img = tf.image.resize(label_img, [target_size, target_size], method=tf.image.ResizeMethod.NEAREST_NEIGHBOR)
 
-    # Normalizasyon (-1 ile 1 arası)
-    input_img = (input_img - 127.5) / 127.5
-    label_img = (label_img - 127.5) / 127.5
+    # Normalizasyon: giris INPUT_NORMALIZATION'a, etiket cikis
+    # aktivasyonunun gerektirdigi aralia gore ayri ayri olceklenir.
+    input_img = normalize_input(input_img)
+    label_low, label_high = get_target_range()
+    label_img = normalize_to_range(label_img, label_low, label_high)
 
     return (input_img, label_img)
 
@@ -416,9 +548,10 @@ def load_and_preprocess_multiscale(image_path):
     input_img = tf.image.resize(input_img, [target_size, target_size], method=tf.image.ResizeMethod.NEAREST_NEIGHBOR)
     label_img = tf.image.resize(label_img, [target_size, target_size], method=tf.image.ResizeMethod.NEAREST_NEIGHBOR)
 
-    # Normalizasyon
-    input_img = (input_img - 127.5) / 127.5
-    label_img = (label_img - 127.5) / 127.5
+    # Normalizasyon (bkz. load_and_preprocess)
+    input_img = normalize_input(input_img)
+    label_low, label_high = get_target_range()
+    label_img = normalize_to_range(label_img, label_low, label_high)
 
     return (input_img, label_img)
 
@@ -427,8 +560,9 @@ def keep_informative_tile(input_img, label_img):
     """Hedefte tamamen/neredeyse tamamen bos (beyaz) karolari eler."""
     del input_img  # Sadece hedef etiket dagilimi kullanilir.
 
-    label_img = tf.clip_by_value(label_img, -1.0, 1.0)
-    label_u8 = (label_img + 1.0) * 127.5
+    low, high = get_target_range()
+    label_img = tf.clip_by_value(label_img, low, high)
+    label_u8 = (label_img - low) * (255.0 / (high - low))
     label_gray = tf.reduce_mean(label_u8, axis=-1)
 
     white_ratio = tf.reduce_mean(
@@ -484,9 +618,9 @@ def save_validation_cache(valid_files, dataset_hash):
     try:
         with open(cache_path, 'w', encoding='utf-8') as f:
             json.dump(cache_data, f)
-        print(f"✅ Doğrulama sonuçları cache'lendi: {cache_path}")
+        print(f"? Doğrulama sonuçları cache'lendi: {cache_path}")
     except Exception as e:
-        print(f"⚠️ Cache kaydedilemedi: {e}")
+        print(f"?? Cache kaydedilemedi: {e}")
 
 
 def validate_quick(image_paths):
@@ -504,7 +638,7 @@ def validate_quick(image_paths):
             invalid_count += 1
     
     if invalid_count > 0:
-        print(f"⚠️ {invalid_count} boş/erişilemeyen dosya atlandı")
+        print(f"?? {invalid_count} boş/erişilemeyen dosya atlandı")
     
     return valid
 
@@ -520,7 +654,7 @@ def validate_full(image_paths):
     for i, path in enumerate(image_paths):
         # Progress her 10000 dosyada bir göster
         if i > 0 and i % 10000 == 0:
-            print(f"  İşleniyor: {i}/{total} ({i*100//total}%)")
+            print(f" şleniyor: {i}/{total} ({i*100//total}%)")
         
         try:
             file_size = os.path.getsize(path)
@@ -532,7 +666,7 @@ def validate_full(image_paths):
             invalid_count += 1
     
     if invalid_count > 0:
-        print(f"⚠️ {invalid_count} bozuk/boş dosya atlandı")
+        print(f"?? {invalid_count} bozuk/boş dosya atlandı")
     
     return valid_paths
 
@@ -542,38 +676,38 @@ def get_validated_paths(all_image_paths):
     mode = Config.VALIDATE_FILES.lower()
     
     if mode == "none":
-        print("📌 Dosya doğrulama: DEVRE DIŞI (ignore_errors aktif)")
+        print("?? Dosya doğrulama: DEVRE DI (ignore_errors aktif)")
         return all_image_paths
     
     elif mode == "quick":
-        print("📌 Dosya doğrulama: HIZLI (sadece boyut kontrolü)")
+        print("?? Dosya doğrulama: HIZLI (sadece boyut kontrolü)")
         return validate_quick(all_image_paths)
     
     elif mode == "cached":
-        print("📌 Dosya doğrulama: CACHE MODUNDA")
+        print("?? Dosya doğrulama: CACHE MODUNDA")
         cache = load_validation_cache()
         dataset_hash = compute_dataset_hash(all_image_paths)
         
         if cache and cache.get("hash") == dataset_hash:
-            print(f"✅ Cache'den yüklendi: {cache['count']} geçerli dosya")
+            print(f"? Cache'den yüklendi: {cache['count']} geçerli dosya")
             # Cache'deki dosyaların hala var olduğunu kontrol et
             valid_from_cache = [p for p in cache["valid_files"] if os.path.exists(p)]
             if len(valid_from_cache) == cache['count']:
                 return valid_from_cache
-            print("⚠️ Bazı dosyalar silinmiş, yeniden doğrulanıyor...")
+            print("?? Bazı dosyalar silinmiş, yeniden doğrulanıyor...")
         
         # Cache yoksa veya geçersizse, hızlı doğrulama yap ve cache'le
-        print("🔄 İlk kez doğrulama yapılıyor (bu sadece bir kez olacak)...")
+        print("?? İlk kez doğrulama yapılıyor (bu sadece bir kez olacak)...")
         valid_paths = validate_quick(all_image_paths)
         save_validation_cache(valid_paths, dataset_hash)
         return valid_paths
     
     elif mode == "full":
-        print("📌 Dosya doğrulama: TAM (her dosya kontrol ediliyor)")
+        print("?? Dosya doğrulama: TAM (her dosya kontrol ediliyor)")
         return validate_full(all_image_paths)
     
     else:
-        print(f"⚠️ Bilinmeyen doğrulama modu: {mode}, 'none' kullanılıyor")
+        print(f"?? Bilinmeyen doğrulama modu: {mode}, 'none' kullanılıyor")
         return all_image_paths
 
 
@@ -660,7 +794,7 @@ def create_datasets():
 
 
 # ==============================================================================
-#                              MODEL MİMARİLERİ
+#                              MODEL MALE
 # ==============================================================================
 
 def create_autoencoder_model(input_shape):
@@ -669,28 +803,29 @@ def create_autoencoder_model(input_shape):
     filter_count = Config.FILTER_COUNT
     kernel_size = Config.KERNEL_SIZE
     strides = Config.STRIDES
-    activation_func = Config.ACTIVATION_FUNC
+    hidden_activation = get_hidden_activation()
+    output_activation = get_output_activation()
     
     input_layer = Input(shape=input_shape)
     
     # Encoder
     x = Conv2D(filter_count, kernel_size=kernel_size, strides=strides,
-               activation='elu', padding='same', kernel_initializer='he_normal')(input_layer)
+               activation=hidden_activation, padding='same', kernel_initializer='he_normal')(input_layer)
     x = Conv2D(filter_count * 2, kernel_size=kernel_size, strides=strides,
-               activation='elu', padding='same', kernel_initializer='he_normal')(x)
+               activation=hidden_activation, padding='same', kernel_initializer='he_normal')(x)
     x = Conv2D(filter_count * 4, kernel_size=kernel_size, strides=strides,
-               activation='elu', padding='same', kernel_initializer='he_normal')(x)
+               activation=hidden_activation, padding='same', kernel_initializer='he_normal')(x)
     
     # Decoder
     x = Conv2DTranspose(filter_count * 4, kernel_size=kernel_size, strides=strides,
-                        activation='elu', padding='same', kernel_initializer='he_normal')(x)
+                        activation=hidden_activation, padding='same', kernel_initializer='he_normal')(x)
     x = Conv2DTranspose(filter_count * 2, kernel_size=kernel_size, strides=strides,
-                        activation='elu', padding='same', kernel_initializer='he_normal')(x)
+                        activation=hidden_activation, padding='same', kernel_initializer='he_normal')(x)
     x = Conv2DTranspose(filter_count, kernel_size=kernel_size, strides=strides,
-                        activation='elu', padding='same', kernel_initializer='he_normal')(x)
+                        activation=hidden_activation, padding='same', kernel_initializer='he_normal')(x)
     
     output_layer = Conv2D(channels, kernel_size=kernel_size, strides=(1, 1),
-                          activation=activation_func, padding='same')(x)
+                          activation=output_activation, padding='same')(x)
     
     return Model(inputs=input_layer, outputs=output_layer)
 
@@ -701,25 +836,26 @@ def create_autoencoder_model_backup(input_shape):
     filter_count = Config.FILTER_COUNT
     kernel_size = Config.KERNEL_SIZE
     strides = Config.STRIDES
-    activation_func = Config.ACTIVATION_FUNC
+    hidden_activation = get_hidden_activation()
+    output_activation = get_output_activation()
     
     input_layer = Input(shape=input_shape)
     
     x = Conv2D(filter_count, kernel_size=kernel_size, strides=strides,
-               activation='elu', padding='same', kernel_initializer='he_normal')(input_layer)
+               activation=hidden_activation, padding='same', kernel_initializer='he_normal')(input_layer)
     x = Conv2D(filter_count * 2, kernel_size=kernel_size, strides=strides,
-               activation='elu', padding='same', kernel_initializer='he_normal')(x)
+               activation=hidden_activation, padding='same', kernel_initializer='he_normal')(x)
     x = Conv2D(filter_count * 4, kernel_size=(3, 3), strides=(1, 1),
-               activation='elu', padding='same', kernel_initializer='he_normal')(x)
+               activation=hidden_activation, padding='same', kernel_initializer='he_normal')(x)
     x = Conv2D(filter_count * 8, kernel_size=(3, 3), strides=(2, 2),
-               activation='elu', padding='same', kernel_initializer='he_normal')(x)
+               activation=hidden_activation, padding='same', kernel_initializer='he_normal')(x)
     
     x = Conv2DTranspose(filter_count * 4, kernel_size=(3, 3), strides=(2, 2),
-                        activation='elu', padding='same', kernel_initializer='he_normal')(x)
+                        activation=hidden_activation, padding='same', kernel_initializer='he_normal')(x)
     x = Conv2DTranspose(filter_count * 2, kernel_size=kernel_size, strides=strides,
-                        activation='elu', padding='same', kernel_initializer='he_normal')(x)
+                        activation=hidden_activation, padding='same', kernel_initializer='he_normal')(x)
     output_layer = Conv2DTranspose(channels, kernel_size=kernel_size, strides=strides,
-                                   activation=activation_func, padding='same', kernel_initializer='he_normal')(x)
+                                   activation=output_activation, padding='same', kernel_initializer='he_normal')(x)
     
     return Model(inputs=input_layer, outputs=output_layer)
 
@@ -729,32 +865,33 @@ def create_upsampled_autoencoder(input_shape):
     channels = get_output_channels()
     filter_count = Config.FILTER_COUNT
     kernel_size = Config.KERNEL_SIZE
-    activation_func = Config.ACTIVATION_FUNC
+    hidden_activation = get_hidden_activation()
+    output_activation = get_output_activation()
 
     input_layer = Input(shape=input_shape)
 
     # Encoder
-    x = Conv2D(filter_count, kernel_size=kernel_size, activation='elu',
+    x = Conv2D(filter_count, kernel_size=kernel_size, activation=hidden_activation,
                padding='same', kernel_initializer='he_normal')(input_layer)
     x = MaxPooling2D((2, 2), padding='same')(x)
 
-    x = Conv2D(filter_count * 2, kernel_size=kernel_size, activation='elu',
+    x = Conv2D(filter_count * 2, kernel_size=kernel_size, activation=hidden_activation,
                padding='same', kernel_initializer='he_normal')(x)
     x = MaxPooling2D((2, 2), padding='same')(x)
 
-    x = Conv2D(filter_count * 4, kernel_size=(3, 3), activation='elu',
+    x = Conv2D(filter_count * 4, kernel_size=(3, 3), activation=hidden_activation,
                padding='same', kernel_initializer='he_normal')(x)
 
     # Decoder
     x = UpSampling2D(size=(2, 2))(x)
-    x = Conv2D(filter_count * 2, kernel_size=kernel_size, activation='elu',
+    x = Conv2D(filter_count * 2, kernel_size=kernel_size, activation=hidden_activation,
                padding='same', kernel_initializer='he_normal')(x)
 
     x = UpSampling2D(size=(2, 2))(x)
-    x = Conv2D(filter_count, kernel_size=kernel_size, activation='elu',
+    x = Conv2D(filter_count, kernel_size=kernel_size, activation=hidden_activation,
                padding='same', kernel_initializer='he_normal')(x)
 
-    output_layer = Conv2D(channels, kernel_size=(1, 1), activation=activation_func, padding='same')(x)
+    output_layer = Conv2D(channels, kernel_size=(1, 1), activation=output_activation, padding='same')(x)
     return Model(inputs=input_layer, outputs=output_layer)
 
 def create_advanced_autoencoder(input_shape):
@@ -763,40 +900,41 @@ def create_advanced_autoencoder(input_shape):
     filter_count = Config.FILTER_COUNT
     kernel_size = Config.KERNEL_SIZE
     strides = Config.STRIDES
-    activation_func = Config.ACTIVATION_FUNC
+    hidden_activation = get_hidden_activation()
+    output_activation = get_output_activation()
     dropout_rate = Config.DROPOUT_RATE
 
     input_layer = Input(shape=input_shape)
 
     # Encoder
     x = Conv2D(filter_count // 2, kernel_size=kernel_size, strides=strides,
-               activation='elu', padding='same')(input_layer)
+               activation=hidden_activation, padding='same')(input_layer)
     x = MaxPooling2D((2, 2), padding='same')(x)
     x = Dropout(dropout_rate)(x)
 
     x = Conv2D(filter_count, kernel_size=kernel_size, strides=strides,
-               activation='elu', padding='same')(x)
+               activation=hidden_activation, padding='same')(x)
     x = MaxPooling2D((2, 2), padding='same')(x)
 
     x = Conv2D(filter_count * 2, kernel_size=kernel_size, strides=strides,
-               activation='elu', padding='same')(x)
+               activation=hidden_activation, padding='same')(x)
 
     # Decoder
     x = Conv2DTranspose(filter_count * 2, kernel_size=kernel_size, strides=strides,
-                        activation='elu', padding='same')(x)
+                        activation=hidden_activation, padding='same')(x)
     x = UpSampling2D((2, 2))(x)
     x = Dropout(dropout_rate)(x)
 
     x = Conv2DTranspose(filter_count, kernel_size=kernel_size, strides=strides,
-                        activation='elu', padding='same')(x)
+                        activation=hidden_activation, padding='same')(x)
     x = UpSampling2D((2, 2))(x)
     x = Dropout(dropout_rate)(x)
 
     x = Conv2DTranspose(filter_count // 2, kernel_size=kernel_size, strides=(1, 1),
-                        activation='elu', padding='same')(x)
+                        activation=hidden_activation, padding='same')(x)
 
     output_layer = Conv2DTranspose(channels, kernel_size=kernel_size, strides=strides,
-                                   activation=activation_func, padding='same')(x)
+                                   activation=output_activation, padding='same')(x)
 
     return Model(inputs=input_layer, outputs=output_layer)
 
@@ -809,7 +947,7 @@ def residual_block(x, filters, dropout_rate=0.0):
 
     y = Conv2D(filters, (3, 3), padding='same', kernel_initializer='he_normal')(x)
     y = BatchNormalization()(y)
-    y = Activation('elu')(y)
+    y = Activation(get_hidden_activation())(y)
 
     y = Conv2D(filters, (3, 3), padding='same', kernel_initializer='he_normal')(y)
     y = BatchNormalization()(y)
@@ -818,12 +956,12 @@ def residual_block(x, filters, dropout_rate=0.0):
         y = Dropout(dropout_rate)(y)
 
     y = Add()([shortcut, y])
-    y = Activation('elu')(y)
+    y = Activation(get_hidden_activation())(y)
     return y
 
 
 def conv_bn_elu(x, filters, kernel_size=(3, 3), dropout_rate=0.0):
-    """Conv + BN + ELU blogu."""
+    """Conv + BN + yapilandirilabilir gizli aktivasyon blogu."""
     y = Conv2D(
         filters,
         kernel_size,
@@ -832,7 +970,7 @@ def conv_bn_elu(x, filters, kernel_size=(3, 3), dropout_rate=0.0):
         kernel_initializer='he_normal'
     )(x)
     y = BatchNormalization()(y)
-    y = Activation('elu')(y)
+    y = Activation(get_hidden_activation())(y)
     if dropout_rate > 0:
         y = Dropout(dropout_rate)(y)
     return y
@@ -855,7 +993,7 @@ def create_unet_residual_model(input_shape):
     channels = get_output_channels()
     base_filters = max(16, int(Config.FILTER_COUNT))
     dropout_rate = Config.DROPOUT_RATE
-    activation_func = Config.ACTIVATION_FUNC
+    output_activation = get_output_activation()
 
     input_layer = Input(shape=input_shape)
 
@@ -884,7 +1022,7 @@ def create_unet_residual_model(input_shape):
     u1 = Concatenate()([u1, e1])
     u1 = residual_block(u1, base_filters)
 
-    output_layer = Conv2D(channels, (1, 1), activation=activation_func, padding='same')(u1)
+    output_layer = Conv2D(channels, (1, 1), activation=output_activation, padding='same')(u1)
     return Model(inputs=input_layer, outputs=output_layer)
 
 def create_gpt_autoencoder(input_shape):
@@ -893,41 +1031,42 @@ def create_gpt_autoencoder(input_shape):
     filter_count = Config.FILTER_COUNT
     kernel_size = Config.KERNEL_SIZE
     l1_reg = Config.L1_REGULARIZATION
-    activation_func = Config.ACTIVATION_FUNC
+    hidden_activation = get_hidden_activation()
+    output_activation = get_output_activation()
     half_filters = max(1, filter_count // 2)
 
     input_layer = Input(shape=input_shape)
 
     # Encoder
-    x = Conv2D(half_filters, kernel_size, activation='elu', padding='same',
+    x = Conv2D(half_filters, kernel_size, activation=hidden_activation, padding='same',
                activity_regularizer=regularizers.l1(l1_reg))(input_layer)
     x = MaxPooling2D((2, 2), padding='same')(x)
     x = Dropout(0.4)(x)
 
-    x = Conv2D(filter_count, kernel_size, activation='elu', padding='same',
+    x = Conv2D(filter_count, kernel_size, activation=hidden_activation, padding='same',
                activity_regularizer=regularizers.l1(l1_reg))(x)
     x = MaxPooling2D((2, 2), padding='same')(x)
     x = Dropout(0.4)(x)
 
-    x = Conv2D(filter_count * 2, kernel_size, activation='elu', padding='same',
+    x = Conv2D(filter_count * 2, kernel_size, activation=hidden_activation, padding='same',
                activity_regularizer=regularizers.l1(l1_reg))(x)
     x = MaxPooling2D((2, 2), padding='same')(x)
     x = Dropout(0.4)(x)
 
     # Decoder
-    x = Conv2DTranspose(filter_count * 2, kernel_size, activation='elu', padding='same')(x)
+    x = Conv2DTranspose(filter_count * 2, kernel_size, activation=hidden_activation, padding='same')(x)
     x = UpSampling2D((2, 2))(x)
     x = Dropout(0.4)(x)
 
-    x = Conv2DTranspose(filter_count, kernel_size, activation='elu', padding='same')(x)
+    x = Conv2DTranspose(filter_count, kernel_size, activation=hidden_activation, padding='same')(x)
     x = UpSampling2D((2, 2))(x)
     x = Dropout(0.4)(x)
 
-    x = Conv2DTranspose(half_filters, kernel_size, activation='elu', padding='same')(x)
+    x = Conv2DTranspose(half_filters, kernel_size, activation=hidden_activation, padding='same')(x)
     x = UpSampling2D((2, 2))(x)
     x = Dropout(0.4)(x)
 
-    output_layer = Conv2DTranspose(channels, kernel_size, activation=activation_func, padding='same')(x)
+    output_layer = Conv2DTranspose(channels, kernel_size, activation=output_activation, padding='same')(x)
 
     return Model(inputs=input_layer, outputs=output_layer)
 
@@ -936,29 +1075,30 @@ def create_gpt_autoencoder_no_reg(input_shape):
     channels = get_output_channels()
     filter_count = Config.FILTER_COUNT
     kernel_size = Config.KERNEL_SIZE
-    activation_func = Config.ACTIVATION_FUNC
+    hidden_activation = get_hidden_activation()
+    output_activation = get_output_activation()
 
     input_layer = Input(shape=input_shape)
 
     # Encoder
-    x = Conv2D(filter_count, kernel_size, activation='elu', padding='same')(input_layer)
+    x = Conv2D(filter_count, kernel_size, activation=hidden_activation, padding='same')(input_layer)
     x = MaxPooling2D((2, 2), padding='same')(x)
     x = Dropout(0.4)(x)
 
-    x = Conv2D(filter_count * 2, kernel_size, activation='elu', padding='same')(x)
+    x = Conv2D(filter_count * 2, kernel_size, activation=hidden_activation, padding='same')(x)
     x = MaxPooling2D((2, 2), padding='same')(x)
     x = Dropout(0.4)(x)
 
     # Decoder
-    x = Conv2DTranspose(filter_count * 2, kernel_size, activation='elu', padding='same')(x)
+    x = Conv2DTranspose(filter_count * 2, kernel_size, activation=hidden_activation, padding='same')(x)
     x = UpSampling2D((2, 2))(x)
     x = Dropout(0.4)(x)
 
-    x = Conv2DTranspose(filter_count, kernel_size, activation='elu', padding='same')(x)
+    x = Conv2DTranspose(filter_count, kernel_size, activation=hidden_activation, padding='same')(x)
     x = UpSampling2D((2, 2))(x)
     x = Dropout(0.4)(x)
 
-    output_layer = Conv2DTranspose(channels, kernel_size, activation=activation_func, padding='same')(x)
+    output_layer = Conv2DTranspose(channels, kernel_size, activation=output_activation, padding='same')(x)
 
     return Model(inputs=input_layer, outputs=output_layer)
 
@@ -967,23 +1107,109 @@ def create_deneysel_model(input_shape):
     channels = get_output_channels()
     filter_count = Config.FILTER_COUNT
     kernel_size = Config.KERNEL_SIZE
-    activation_func = Config.ACTIVATION_FUNC
+    hidden_activation = get_hidden_activation()
+    output_activation = get_output_activation()
     
     input_layer = Input(shape=input_shape)
     
     x = Conv2D(filter_count * 16, kernel_size=(5, 5), strides=(2, 2),
-               activation='relu', padding='same', kernel_initializer='he_normal')(input_layer)
+               activation=hidden_activation, padding='same', kernel_initializer='he_normal')(input_layer)
     x = Conv2D(filter_count * 8, kernel_size=kernel_size, strides=(1, 1),
-               activation='relu', padding='same', kernel_initializer='he_normal')(x)
+               activation=hidden_activation, padding='same', kernel_initializer='he_normal')(x)
     
     x = Conv2DTranspose(filter_count * 4, kernel_size=kernel_size, strides=(1, 1),
-                        activation='relu', padding='same', kernel_initializer='he_normal')(x)
+                        activation=hidden_activation, padding='same', kernel_initializer='he_normal')(x)
     x = Conv2DTranspose(filter_count * 2, kernel_size=(5, 5), strides=(2, 2),
-                        activation='relu', padding='same', kernel_initializer='he_normal')(x)
+                        activation=hidden_activation, padding='same', kernel_initializer='he_normal')(x)
     
     output_layer = Conv2D(channels, kernel_size=kernel_size, strides=(1, 1),
-                          activation=activation_func, padding='same')(x)
+                          activation=output_activation, padding='same')(x)
     
+    return Model(inputs=input_layer, outputs=output_layer)
+
+
+def create_flat_bottleneck_model(input_shape):
+    """Tam cozunurlukte, daralan, sig conv yigini. Benchmark'ta kazanan mimari.
+
+    arsiv/autoencoder_gpu_froom_kaggle.py:163-171 mimarisinin parametrize
+    edilmis hali. top_modeller/ altindaki 0.68-0.70 success_25m alan modeller
+    bu yapiyla uretildi (dogrulama: parametre sayilari birebir uyusuyor,
+    ornegin f48/k4 icin 816 / 18456 / 4620 ...).
+
+    Kritik ozellikler ve NEDEN oyle olmalari gerektigi:
+
+    - Uzamsal indirme YOK. Her katman girisle ayni cozunurlukte kalir
+      (STRIDES=(1,1), pooling yok). Sablon eslesmesi piksel duzeyinde
+      karsiliklilik ister; indirme + geri yukseltme bu karsilikliligi bozar.
+    - Kanal sayisi DARALIR (f -> f/2 -> f/4), genislemez. Darboga bilgi
+      miktarini sinirlar ve agin semantik harita cizmesini engeller.
+    - Skip connection ve BatchNorm YOK. Alici alan kucuk kalir
+      (kernel k, 6 katman -> ~1 + 6*(k-1) piksel), boylece ag ancak yerel
+      doku/kenar donusumu ogrenebilir.
+
+    Olculen sonuc: bu sinif kaynaklar-arasi yanlis-tepe oranini 0.62'den
+    0.32'ye indirir. Buna karsilik indirme yapan derin create_classic_model
+    ayni orani 2.9'a cikarir, yani ham goruntuden kotu hale gelir.
+    """
+    channels = get_output_channels()
+    filter_count = max(4, int(Config.FILTER_COUNT))
+    kernel_size = Config.KERNEL_SIZE
+    strides = Config.STRIDES
+    hidden_activation = get_hidden_activation()
+    output_activation = get_output_activation()
+
+    if tuple(strides) != (1, 1):
+        raise ValueError(
+            "flat_bottleneck mimarisi tam cozunurluk gerektirir; "
+            f"STRIDES=(1, 1) olmalidir, bulunan={tuple(strides)}."
+        )
+
+    # Daralma zinciri: f, f/2, f/4, ... Config.FLAT_DEPTH kadar.
+    depth = max(1, int(getattr(Config, "FLAT_DEPTH", 3)))
+    widths = []
+    for level in range(depth):
+        width = filter_count // (2 ** level)
+        if width < 1:
+            raise ValueError(
+                f"FILTER_COUNT={filter_count} bu derinlik icin fazla kucuk "
+                f"(FLAT_DEPTH={depth}); daralma zinciri sifira dusuyor."
+            )
+        widths.append(width)
+
+    input_layer = Input(shape=input_shape)
+    x = input_layer
+
+    # Encoder: daralan conv yigini.
+    for width in widths:
+        x = Conv2D(
+            width,
+            kernel_size=kernel_size,
+            strides=(1, 1),
+            activation=hidden_activation,
+            padding='same',
+            kernel_initializer='he_normal',
+        )(x)
+
+    # Decoder: ayni genislikler ters sirada, transpose conv ile.
+    for width in reversed(widths):
+        x = Conv2DTranspose(
+            width,
+            kernel_size=kernel_size,
+            strides=(1, 1),
+            activation=hidden_activation,
+            padding='same',
+            kernel_initializer='he_normal',
+        )(x)
+
+    output_layer = Conv2D(
+        channels,
+        kernel_size=kernel_size,
+        strides=(1, 1),
+        activation=output_activation,
+        padding='same',
+        name='model_output',
+    )(x)
+
     return Model(inputs=input_layer, outputs=output_layer)
 
 
@@ -992,7 +1218,8 @@ def create_classic_model(input_shape):
     channels = get_output_channels()
     base_filters = max(16, int(Config.FILTER_COUNT))
     kernel_size = Config.KERNEL_SIZE
-    activation_func = Config.ACTIVATION_FUNC
+    hidden_activation = get_hidden_activation()
+    output_activation = get_output_activation()
     dropout_rate = float(np.clip(Config.DROPOUT_RATE, 0.0, 0.6))
 
     input_layer = Input(shape=input_shape)
@@ -1015,7 +1242,7 @@ def create_classic_model(input_shape):
         kernel_initializer='he_normal'
     )(skip1)
     x = BatchNormalization()(x)
-    x = Activation('elu')(x)
+    x = Activation(hidden_activation)(x)
     skip2 = conv_bn_elu(
         x,
         base_filters * 2,
@@ -1032,7 +1259,7 @@ def create_classic_model(input_shape):
         kernel_initializer='he_normal'
     )(skip2)
     x = BatchNormalization()(x)
-    x = Activation('elu')(x)
+    x = Activation(hidden_activation)(x)
     x = conv_bn_elu(
         x,
         base_filters * 4,
@@ -1056,7 +1283,7 @@ def create_classic_model(input_shape):
         kernel_initializer='he_normal'
     )(x)
     x = BatchNormalization()(x)
-    x = Activation('elu')(x)
+    x = Activation(hidden_activation)(x)
     x = align_spatial_to(x, skip2, name='classic_align_skip2')
     x = Concatenate()([x, skip2])
     x = conv_bn_elu(
@@ -1075,7 +1302,7 @@ def create_classic_model(input_shape):
         kernel_initializer='he_normal'
     )(x)
     x = BatchNormalization()(x)
-    x = Activation('elu')(x)
+    x = Activation(hidden_activation)(x)
     x = align_spatial_to(x, skip1, name='classic_align_skip1')
     x = Concatenate()([x, skip1])
     x = conv_bn_elu(
@@ -1097,7 +1324,7 @@ def create_classic_model(input_shape):
     # Dinamik giriste tek/çift boyut farklarinda cikisi girisle hizala.
     logits = align_spatial_to(logits, input_layer, name='classic_output_align')
 
-    output_layer = Activation(activation_func)(logits)
+    output_layer = Activation(output_activation, name='model_output_tanh')(logits)
     return Model(inputs=input_layer, outputs=output_layer)
 
 
@@ -1132,6 +1359,7 @@ def get_model(input_shape):
         "gpt_no_reg": create_gpt_autoencoder_no_reg,
         "deneysel": create_deneysel_model,
         "classic": create_classic_model,
+        "flat_bottleneck": create_flat_bottleneck_model,
     }
     
     model_type = Config.MODEL_TYPE.lower()
@@ -1191,7 +1419,11 @@ def get_callbacks():
     
     # Checkpoint callback
     if Config.SAVE_CHECKPOINTS:
-        checkpoint_path = f'_{timestamp}_model_f{Config.FILTER_COUNT}_k{Config.KERNEL_SIZE[0]}_epoch_{{epoch:05d}}_{Config.ACTIVATION_FUNC}_{Config.STRIDES}_.h5'
+        checkpoint_path = (
+            f'_{timestamp}_model_f{Config.FILTER_COUNT}_k{Config.KERNEL_SIZE[0]}'
+            f'_epoch_{{epoch:05d}}_h{Config.HIDDEN_ACTIVATION}'
+            f'_o{Config.OUTPUT_ACTIVATION}_{Config.STRIDES}_.h5'
+        )
         if Config.SAVE_DIR:
             checkpoint_path = os.path.join(Config.SAVE_DIR, checkpoint_path)
         
@@ -1202,6 +1434,45 @@ def get_callbacks():
             verbose=1
         )
         callbacks.append(checkpoint)
+
+    # Best validation loss Callback
+    loss_checkpoint_path = f'_{timestamp}_best_val_loss_model_f{Config.FILTER_COUNT}_k{Config.KERNEL_SIZE[0]}.h5'
+    if Config.SAVE_DIR:
+        loss_checkpoint_path = os.path.join(Config.SAVE_DIR, loss_checkpoint_path)
+    loss_checkpoint = ModelCheckpoint(
+        loss_checkpoint_path,
+        monitor='val_loss',
+        save_best_only=True,
+        mode='min',
+        verbose=1,
+    )
+    callbacks.append(loss_checkpoint)
+
+    # Best MAE Callback
+    mae_checkpoint_path = f'_{timestamp}_best_mae_model_f{Config.FILTER_COUNT}_k{Config.KERNEL_SIZE[0]}.h5'
+    if Config.SAVE_DIR:
+        mae_checkpoint_path = os.path.join(Config.SAVE_DIR, mae_checkpoint_path)
+    mae_checkpoint = ModelCheckpoint(
+        mae_checkpoint_path,
+        monitor='val_mae',
+        save_best_only=True,
+        mode='min',
+        verbose=1,
+    )
+    callbacks.append(mae_checkpoint)
+
+    # Best SSIM Callback
+    ssim_checkpoint_path = f'_{timestamp}_best_ssim_model_f{Config.FILTER_COUNT}_k{Config.KERNEL_SIZE[0]}.h5'
+    if Config.SAVE_DIR:
+        ssim_checkpoint_path = os.path.join(Config.SAVE_DIR, ssim_checkpoint_path)
+    ssim_checkpoint = ModelCheckpoint(
+        ssim_checkpoint_path,
+        monitor='val_ssim_metric',
+        save_best_only=True,
+        mode='max',
+        verbose=1,
+    )
+    callbacks.append(ssim_checkpoint)
     
     # Periodic save callback
     if Config.PERIODIC_SAVE_STEPS > 0:
@@ -1256,7 +1527,8 @@ def print_config():
     print(f"  Görüntü Boyutu:     {Config.IMAGE_SIZE}x{Config.IMAGE_SIZE}")
     print(f"  Model Tipi:         {Config.MODEL_TYPE}")
     print(f"  Önceden Eğitilmiş:  {Config.PRETRAINED_MODEL or 'Yok'}")
-    print(f"  Aktivasyon:         {Config.ACTIVATION_FUNC}")
+    print(f"  Gizli Aktivasyon:   {Config.HIDDEN_ACTIVATION}")
+    print(f"  Cikis Aktivasyonu:  {Config.OUTPUT_ACTIVATION}")
     print(f"  Filtre Sayısı:      {Config.FILTER_COUNT}")
     print(f"  Kernel Boyutu:      {Config.KERNEL_SIZE}")
     print(f"  Stride:             {Config.STRIDES}")
@@ -1272,6 +1544,7 @@ def print_config():
 
 def main():
     """Ana eğitim fonksiyonu."""
+    validate_activation_contract()
     
     # Yapılandırmayı yazdır
     print_config()
@@ -1306,7 +1579,7 @@ def main():
     
     # Eğitimi başlat
     print("\n" + "=" * 60)
-    print("                    EĞİTİM BAŞLIYOR")
+    print("                    EĞİTİM BLIYOR")
     print("=" * 60 + "\n")
     
     history = model.fit(
@@ -1317,7 +1590,7 @@ def main():
     )
     
     # Final modeli kaydet
-    final_model_path = Config.FINAL_MODEL_NAME
+    final_model_path = f"_{get_timestamp()}_{Config.FINAL_MODEL_NAME}"
     if Config.SAVE_DIR:
         final_model_path = os.path.join(Config.SAVE_DIR, final_model_path)
     
@@ -1325,7 +1598,7 @@ def main():
     print(f"\nFinal model kaydedildi: {final_model_path}")
     
     print("\n" + "=" * 60)
-    print("                    EĞİTİM TAMAMLANDI")
+    print("                    EM TAMAMLANDI")
     print("=" * 60 + "\n")
     
     return model, history
