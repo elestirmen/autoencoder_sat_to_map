@@ -16,6 +16,8 @@ Desteklenen Modlar:
 
 import os
 import cv2
+import json
+import time
 import numpy as np
 import datetime
 import tensorflow as tf
@@ -277,6 +279,43 @@ def normalize_to_range(pixels, low, high):
     return pixels * ((high - low) / 255.0) + low
 
 
+def preprocessing_contract():
+    """Modelin eğitildiği girdi ön işlemesini sözlük olarak döndürür.
+
+    Bu sözlük her model dosyasının yanına "<model>.pre.json" olarak yazılır.
+    Çıkarım tarafı (src/goruntu_islemleri.py ve template-matching) bu dosyayı
+    okuyarak aynı ön işlemeyi uygular. Model dosyasının kendisinden giriş
+    normalizasyonu OKUNAMAZ: çıkış aktivasyonu yalnızca çıkış aralığını söyler.
+    """
+    return {
+        "input_normalization": get_input_normalization(),
+        # Eğitimde histogram eşitleme yalnızca bu renk modunda uygulanır
+        # (bkz. load_and_preprocess). tfa.image.equalize, PIL ImageOps.equalize'in
+        # portudur; OpenCV'nin equalizeHist'i DEĞİLDİR. Çıkarım tarafındaki
+        # karşılığı bu yüzden "hist_eq" değil "hist_eq_pil"dir.
+        "enhancement": "hist_eq_pil" if Config.COLOR_MODE == "grayscale_with_equalize" else "none",
+        "color_mode": "rgb" if get_input_channels() == 3 else "grayscale",
+        "image_size": int(Config.IMAGE_SIZE),
+        "output_activation": Config.OUTPUT_ACTIVATION,
+        "output_color_mode": "rgb" if get_output_channels() == 3 else "grayscale",
+        "trained_by": "autoencoder_unified.py",
+    }
+
+
+def write_preprocessing_sidecar(model_path, quiet=False):
+    """Model dosyasının yanına ön işleme sözleşmesini yazar; yolunu döndürür."""
+    sidecar_path = os.path.splitext(str(model_path))[0] + ".pre.json"
+    try:
+        with open(sidecar_path, "w", encoding="utf-8") as f:
+            json.dump(preprocessing_contract(), f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"[UYARI] Ön işleme sözleşmesi yazılamadı ({sidecar_path}): {e}")
+        return None
+    if not quiet:
+        print(f"[Sözleşme] {sidecar_path}")
+    return sidecar_path
+
+
 def normalize_input(pixels):
     """Giris goruntusunu INPUT_NORMALIZATION ayarina gore olcekle.
 
@@ -438,11 +477,55 @@ class PeriodicSave(tf.keras.callbacks.Callback):
         if self.save_every > 0 and batch % self.save_every == 0 and batch > 0:
             save_path = f'{self.model_name_prefix}_step_{batch}.h5'
             self.model.save(save_path)
+            write_preprocessing_sidecar(save_path, quiet=True)
             print(f"\n[PeriodicSave] Model kaydedildi: {save_path}")
 
     def on_epoch_end(self, epoch, logs=None):
         save_path = f'{self.model_name_prefix}_epoch_{epoch}.h5'
         self.model.save(save_path)
+        write_preprocessing_sidecar(save_path, quiet=True)
+
+
+class PreprocessingSidecarWriter(tf.keras.callbacks.Callback):
+    """Eğitim sırasında oluşan her model dosyasının yanına sözleşmeyi yazar.
+
+    ModelCheckpoint dosya adını kendi içinde ({epoch:05d} gibi) çözdüğü için
+    yol kalıbını dışarıdan bilmek güvenilir değildir; bunun yerine kayıt klasörü
+    taranır ve eğitim başladıktan SONRA oluşmuş, sözleşmesi olmayan model
+    dosyaları için sözleşme yazılır. Eski modellere dokunulmaz.
+    """
+
+    def __init__(self, save_dir=None):
+        super(PreprocessingSidecarWriter, self).__init__()
+        self.save_dir = save_dir or "."
+        self.started_at = time.time()
+
+    def _sweep(self):
+        try:
+            names = os.listdir(self.save_dir)
+        except Exception:
+            return
+        for name in names:
+            if not name.endswith((".h5", ".keras")):
+                continue
+            path = os.path.join(self.save_dir, name)
+            sidecar = os.path.splitext(path)[0] + ".pre.json"
+            if os.path.exists(sidecar):
+                continue
+            try:
+                # Eğitimden önce var olan modellere sözleşme yazma: onların
+                # hangi ön işlemeyle eğitildiğini bilmiyoruz.
+                if os.path.getmtime(path) < self.started_at - 1:
+                    continue
+            except OSError:
+                continue
+            write_preprocessing_sidecar(path, quiet=True)
+
+    def on_epoch_end(self, epoch, logs=None):
+        self._sweep()
+
+    def on_train_end(self, logs=None):
+        self._sweep()
 
 
 # ==============================================================================
@@ -1486,6 +1569,9 @@ def get_callbacks():
         )
         callbacks.append(periodic_save)
     
+    # Ön işleme sözleşmesi: checkpoint'lerin yanına "<model>.pre.json" yazar.
+    callbacks.append(PreprocessingSidecarWriter(save_dir=Config.SAVE_DIR or "."))
+
     # Early stopping
     if Config.EARLY_STOPPING_PATIENCE > 0:
         early_stopping = EarlyStopping(
@@ -1595,6 +1681,7 @@ def main():
         final_model_path = os.path.join(Config.SAVE_DIR, final_model_path)
     
     model.save(final_model_path)
+    write_preprocessing_sidecar(final_model_path)
     print(f"\nFinal model kaydedildi: {final_model_path}")
     
     print("\n" + "=" * 60)

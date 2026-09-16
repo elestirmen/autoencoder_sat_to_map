@@ -41,7 +41,10 @@ try:
 except Exception:
     h5py = None
 
-from goruntu_islemleri import ImageProcessor, CONFIG, TENSORFLOW_AVAILABLE
+from goruntu_islemleri import (
+    ImageProcessor, CONFIG, TENSORFLOW_AVAILABLE,
+    DEFAULT_PREPROCESSING, load_preprocessing_sidecar, preprocessing_sidecar_path,
+)
 
 
 # --- Açılır liste sentinel (özel) değerleri ---
@@ -62,8 +65,10 @@ NORMALIZATION_CHOICES = [
 # Normalizasyondan önce karoya uygulanacak kontrast/histogram iyileştirmesi.
 ENHANCEMENT_CHOICES = [
     ("Yok  ·  iyileştirme uygulanmaz", "none"),
-    ("Histogram eşitleme  ·  global kontrast", "hist_eq"),
+    ("Histogram eşitleme  ·  global kontrast (OpenCV)", "hist_eq"),
+    ("Histogram eşitleme  ·  PIL/tfa uyumlu (2022 eğitimiyle birebir)", "hist_eq_pil"),
     ("CLAHE  ·  uyarlamalı yerel kontrast", "clahe"),
+    ("Kenar (Laplacian)  ·  doku yerine yapı", "edge"),
 ]
 
 
@@ -192,12 +197,22 @@ def _detect_note(kind, message):
 
 
 def on_model_change(model_choice, model_file):
-    """Model seçimi değişince color_mode / normalizasyon / tile_size'ı modelden önerir.
+    """Model seçimi değişince girdi ön işleme ayarlarını modelden önerir.
 
-    Çıkış sırası: color_mode, normalization, tile_size, detect_note (4 değer).
-    Öneridir; kullanıcı açılır listelerden elle ezebilir.
+    Çıkış sırası: color_mode, normalization, tile_size, enhancement,
+    detect_note (5 değer). Öneridir; kullanıcı elle ezebilir.
+
+    Öncelik sırası:
+      1. "<model>.pre.json" ön işleme sözleşmesi (eğitimin yazdığı kesin bilgi),
+      2. model mimarisi (yalnızca kanal sayısı ve tile_size için),
+      3. emniyetli varsayılan (minus1_1 + none).
+
+    DİKKAT: Giriş normalizasyonu ÇIKIŞ aktivasyonundan türetilmez. İkisi
+    bağımsızdır; 2022 modelleri sigmoid çıkışlı olduğu halde [-1, 1] girişle
+    ve histogram eşitlemeyle eğitilmiştir. Sözleşme yoksa tahmin edilmez,
+    varsayılan kullanılır ve kullanıcı uyarılır.
     """
-    no_change = (gr.update(), gr.update(), gr.update())
+    no_change = (gr.update(), gr.update(), gr.update(), gr.update())
 
     # Aktif model yolunu run_pipeline ile aynı öncelikle çöz: yüklenen dosya > dropdown.
     path = None
@@ -217,16 +232,20 @@ def on_model_change(model_choice, model_file):
     if not path:
         return (*no_change, _detect_note("idle", ""))
 
-    info = inspect_model_file(path)
-    if not info:
+    info = inspect_model_file(path) or {}
+    contract = load_preprocessing_sidecar(path)
+
+    if not info and not contract:
         return (*no_change, _detect_note(
-            "warn", "Model mimarisi okunamadı — color_mode / normalizasyonu elle seçin."))
+            "warn", "Model mimarisi okunamadı ve ön işleme sözleşmesi yok — ayarları elle seçin."))
 
     parts = []
     color_update = gr.update()
     norm_update = gr.update()
     tile_update = gr.update()
+    enh_update = gr.update()
 
+    # --- Kanal sayısı ve karo boyutu: mimariden okunabilir, güvenilir. ---
     if info.get("channels") == 1:
         color_update = gr.update(value="grayscale")
         parts.append("color_mode → grayscale (1 kanal)")
@@ -234,27 +253,49 @@ def on_model_change(model_choice, model_file):
         color_update = gr.update(value="rgb")
         parts.append("color_mode → rgb (3 kanal)")
 
-    act = (info.get("activation") or "").lower()
-    if act == "tanh":
-        norm_update = gr.update(value="minus1_1")
-        parts.append("normalizasyon → [-1, 1] (tanh)")
-    elif act in ("sigmoid", "hard_sigmoid"):
-        norm_update = gr.update(value="zero_1")
-        parts.append("normalizasyon → [0, 1] (sigmoid)")
-    elif act:
-        parts.append(f"çıkış aktivasyonu '{act}' — normalizasyonu elle seçin")
-
     if info.get("tile_size"):
         tile_update = gr.update(value=int(info["tile_size"]))
         parts.append(f"tile_size → {int(info['tile_size'])}")
 
-    if parts:
-        note = _detect_note(
-            "done", "Modelden algılandı: " + "; ".join(parts) + ". Gerekirse elle değiştirebilirsiniz.")
+    # --- Girdi ön işlemesi: yalnızca sözleşmeden; aktivasyondan TÜRETİLMEZ. ---
+    if contract:
+        norm = contract.get("input_normalization")
+        enh = contract.get("enhancement")
+        if norm in [v for _, v in NORMALIZATION_CHOICES]:
+            norm_update = gr.update(value=norm)
+            parts.append(f"normalizasyon → {norm} (sözleşme)")
+        if enh in [v for _, v in ENHANCEMENT_CHOICES]:
+            enh_update = gr.update(value=enh)
+            parts.append(f"iyileştirme → {enh} (sözleşme)")
+        if contract.get("image_size"):
+            tile_update = gr.update(value=int(contract["image_size"]))
+            parts.append(f"tile_size → {int(contract['image_size'])} (sözleşme)")
+        kind = "done"
+        extra = " Ön işleme sözleşmesinden okundu."
     else:
-        note = _detect_note(
-            "warn", "Modelden belirleyici bilgi okunamadı — ayarları elle kontrol edin.")
-    return (color_update, norm_update, tile_update, note)
+        # Sözleşme yok: emniyetli varsayılana dön, tahmin YAPMA, kullanıcıyı uyar.
+        norm_update = gr.update(value=DEFAULT_PREPROCESSING["input_normalization"])
+        enh_update = gr.update(value=DEFAULT_PREPROCESSING["enhancement"])
+        parts.append(f"normalizasyon → {DEFAULT_PREPROCESSING['input_normalization']} (varsayılan)")
+        parts.append(f"iyileştirme → {DEFAULT_PREPROCESSING['enhancement']} (varsayılan)")
+        kind = "warn"
+        act = (info.get("activation") or "").lower()
+        extra = (
+            " Bu modelin yanında ön işleme kaydı ("
+            + os.path.basename(preprocessing_sidecar_path(path))
+            + ") yok; giriş normalizasyonu model dosyasından OKUNAMAZ."
+        )
+        if act in ("sigmoid", "hard_sigmoid"):
+            extra += (
+                " Çıkış aktivasyonu sigmoid: bu depodaki 2022 modelleri böyledir ve "
+                "girişleri minus1_1 + hist_eq ile eğitilmiştir — iyileştirmeyi "
+                "'hist_eq' yapmanız gerekebilir."
+            )
+        elif act:
+            extra += " Çıkış aktivasyonu '" + act + "' yalnızca çıkış ölçeğini belirler."
+
+    note = _detect_note(kind, "Modelden algılandı: " + "; ".join(parts) + "." + extra)
+    return (color_update, norm_update, tile_update, enh_update, note)
 
 
 # ----------------------------------------------------------------------------
@@ -964,11 +1005,11 @@ def build_ui():
         # Model seçimi/yüklemesi değişince color_mode/normalizasyon/tile_size'ı modelden öner.
         model_dd.change(
             fn=on_model_change, inputs=[model_dd, model_file],
-            outputs=[color_mode, normalization, tile_size, detect_note],
+            outputs=[color_mode, normalization, tile_size, enhancement, detect_note],
         )
         model_file.change(
             fn=on_model_change, inputs=[model_dd, model_file],
-            outputs=[color_mode, normalization, tile_size, detect_note],
+            outputs=[color_mode, normalization, tile_size, enhancement, detect_note],
         )
         refresh_btn.click(
             fn=refresh_lists, inputs=[],

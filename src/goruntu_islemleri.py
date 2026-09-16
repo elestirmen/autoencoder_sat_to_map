@@ -346,7 +346,6 @@ os.environ["OPENCV_IO_MAX_IMAGE_PIXELS"] = str(CONFIG["opencv"]["max_image_pixel
 
 import cv2
 import numpy as np
-import matplotlib.pyplot as plt
 from natsort import natsorted
 import rasterio
 from affine import Affine
@@ -396,6 +395,101 @@ except ImportError:
 NORMALIZATION_MODES = ("minus1_1", "zero_1", "raw", "zscore")
 
 
+# ============================================================================
+# MODEL ÖN İŞLEME SÖZLEŞMESİ (SIDECAR)
+# ============================================================================
+# Bir modelin hangi girdi ön işlemesiyle eğitildiği model dosyasından okunamaz:
+# çıkış aktivasyonu (tanh/sigmoid) yalnızca ÇIKIŞ aralığını söyler, girişin
+# nasıl ölçeklendiğini söylemez. 2022 modelleri bunun kanıtıdır: çıkışları
+# sigmoid olduğu halde girişleri [-1, 1] ve histogram eşitlemelidir.
+#
+# Bu yüzden eğitim, her model dosyasının yanına "<model>.pre.json" yazar ve
+# hem harita üretici hem template-matching aynı dosyayı okur. Sözleşme yoksa
+# her iki taraf da aynı emniyetli varsayılana düşer: minus1_1 + none.
+# ============================================================================
+MODEL_PREPROCESSING_SUFFIX = ".pre.json"
+
+# Sözleşme yokken kullanılacak varsayılanlar (iki boru hattında da aynı).
+DEFAULT_PREPROCESSING = {
+    "input_normalization": "minus1_1",
+    "enhancement": "none",
+    "clahe_clip": 2.0,
+}
+
+
+def preprocessing_sidecar_path(model_path: str) -> str:
+    """Model dosyasına ait ön işleme sözleşmesinin yolunu döndürür."""
+    return os.path.splitext(str(model_path))[0] + MODEL_PREPROCESSING_SUFFIX
+
+
+def load_preprocessing_sidecar(model_path: str) -> Optional[Dict[str, Any]]:
+    """Model yanındaki "<model>.pre.json" sözleşmesini okur (yoksa None).
+
+    Dönen sözlük şu anahtarları içerebilir: input_normalization, enhancement,
+    clahe_clip, color_mode, image_size, output_activation.
+    """
+    path = preprocessing_sidecar_path(model_path)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except Exception as e:
+        logger.warning(f"Ön işleme sözleşmesi okunamadı ({path}): {e}")
+        return None
+    if not isinstance(data, dict):
+        logger.warning(f"Ön işleme sözleşmesi beklenen biçimde değil: {path}")
+        return None
+    return data
+
+
+def save_preprocessing_sidecar(model_path: str, **contract: Any) -> str:
+    """Model dosyasının yanına ön işleme sözleşmesini yazar ve yolunu döndürür."""
+    path = preprocessing_sidecar_path(model_path)
+    payload = {k: v for k, v in contract.items() if v is not None}
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+    return path
+
+
+def resolve_preprocessing(
+    model_path: str,
+    normalization: str = "auto",
+    enhancement: str = "auto",
+    clahe_clip: Optional[float] = None,
+) -> Tuple[str, str, float]:
+    """İstenen ayarları sözleşmeyle birleştirir: (normalization, enhancement, clahe_clip).
+
+    "auto" verilen alanlar sözleşmeden, sözleşme yoksa DEFAULT_PREPROCESSING'ten
+    doldurulur. Açıkça değer verilen alanlar korunur; sözleşmeyle çelişiyorsa
+    uyarı basılır (kullanıcı bilerek deneme yapıyor olabilir).
+    """
+    contract = load_preprocessing_sidecar(model_path) or {}
+    if contract:
+        logger.info(f"Ön işleme sözleşmesi bulundu: {preprocessing_sidecar_path(model_path)}")
+
+    def _pick(requested: Any, key: str, default: Any, label: str) -> Any:
+        contract_value = contract.get(key)
+        if requested in (None, "auto"):
+            if contract_value is not None:
+                logger.info(f"{label}: sözleşmeden alındı -> {contract_value}")
+                return contract_value
+            return default
+        if contract_value is not None and contract_value != requested:
+            logger.warning(
+                f"⚠️  {label} olarak '{requested}' istendi ama model '{contract_value}' "
+                f"ile eğitilmiş. İstenen değer kullanılacak; çıktı bozuk olabilir."
+            )
+        return requested
+
+    norm = _pick(normalization, "input_normalization",
+                 DEFAULT_PREPROCESSING["input_normalization"], "Normalizasyon")
+    enh = _pick(enhancement, "enhancement",
+                DEFAULT_PREPROCESSING["enhancement"], "İyileştirme")
+    clip = _pick(clahe_clip, "clahe_clip", DEFAULT_PREPROCESSING["clahe_clip"], "CLAHE clipLimit")
+    return str(norm), str(enh), float(clip)
+
+
 def apply_normalization(pixels: np.ndarray, mode: str) -> np.ndarray:
     """Karo piksellerini (float32, 0-255 aralığında) sinir ağı girişine normalize eder.
 
@@ -420,7 +514,40 @@ def apply_normalization(pixels: np.ndarray, mode: str) -> np.ndarray:
 
 
 # Karo, normalizasyondan ÖNCE uygulanabilecek kontrast/histogram iyileştirmeleri.
-ENHANCEMENT_MODES = ("none", "hist_eq", "clahe")
+# Bu liste template-matching tarafındaki MODEL_INPUT_NORM modlarıyla birebir
+# eşleşir (HAM/HISTEQ/CLAHE/EDGE); aynı model iki boru hattında aynı girdiyi
+# görsün diye iki taraf birlikte güncellenmelidir.
+ENHANCEMENT_MODES = ("none", "hist_eq", "hist_eq_pil", "clahe", "edge")
+
+
+def equalize_pil(gray: np.ndarray) -> np.ndarray:
+    """PIL ImageOps.equalize / tfa.image.equalize ile BIREBIR ayni histogram esitlemesi.
+
+    Neden ayri bir mod: cv2.equalizeHist standart CDF esleme kullanir,
+    PIL/TFA ise farkli bir LUT kurar (adim = (toplam - son_dolu_kova) // 255,
+    yarim adim kaydirma, bir saga oteleme). Ayni karoda ortalama ~6, uc
+    durumda 150+ gri seviye ayrisirlar. 2022 modelleri TFA ile egitildigi
+    icin egitimle birebir ayni girdi ancak bu fonksiyonla uretilir.
+
+    Args:
+        gray: 2B uint8 gri goruntu.
+
+    Returns:
+        Esitlenmis 2B uint8 goruntu.
+    """
+    histogram = np.bincount(gray.reshape(-1), minlength=256).astype(np.int64)
+    nonzero = histogram[histogram != 0]
+    if nonzero.size <= 1:
+        return gray.copy()
+
+    step = (int(nonzero.sum()) - int(nonzero[-1])) // 255
+    if step == 0:
+        return gray.copy()
+
+    # lut[i] = (step//2 + h[0..i-1] toplami) // step   (PIL'in kurdugu tablo)
+    exclusive_cumsum = np.concatenate(([0], np.cumsum(histogram)[:-1]))
+    lut = np.clip((exclusive_cumsum + step // 2) // step, 0, 255).astype(np.uint8)
+    return lut[gray]
 
 
 def apply_enhancement(pixels: np.ndarray, mode: str, clahe_clip: float = 2.0) -> np.ndarray:
@@ -429,29 +556,32 @@ def apply_enhancement(pixels: np.ndarray, mode: str, clahe_clip: float = 2.0) ->
     Args:
         pixels: Görüntü dizisi (uint8 beklenir; RGB sırası). 2B grayscale veya
             3B (H, W, 3) olabilir.
-        mode: 'none' -> dokunma, 'hist_eq' -> histogram eşitleme,
-              'clahe' -> kontrast sınırlı uyarlamalı histogram eşitleme.
+        mode: 'none' -> dokunma, 'hist_eq' -> histogram eşitleme (OpenCV),
+              'hist_eq_pil' -> PIL/tfa uyumlu eşitleme (2022 eğitimiyle birebir),
+              'clahe' -> kontrast sınırlı uyarlamalı histogram eşitleme,
+              'edge' -> Laplacian kenar büyüklüğü (doku yerine yapı bilgisi).
         clahe_clip: CLAHE için kontrast sınırı (clipLimit).
 
     Returns:
         İyileştirilmiş dizi (giriş ile aynı şekil ve uint8 dtype).
     """
-    if mode not in ("hist_eq", "clahe"):
+    if mode not in ("hist_eq", "hist_eq_pil", "clahe", "edge"):
         return pixels
 
     img = pixels if pixels.dtype == np.uint8 else np.clip(pixels, 0, 255).astype(np.uint8)
     is_gray = (img.ndim == 2) or (img.ndim == 3 and img.shape[2] == 1)
     gray = img[:, :, 0] if (img.ndim == 3 and img.shape[2] == 1) else img
 
-    if mode == "hist_eq":
+    if mode in ("hist_eq", "hist_eq_pil"):
+        _esitle = cv2.equalizeHist if mode == "hist_eq" else equalize_pil
         if is_gray:
-            out = cv2.equalizeHist(gray)
+            out = _esitle(gray)
         else:
             # Renk bozulmasın diye yalnızca parlaklık (Y) kanalı eşitlenir.
             ycrcb = cv2.cvtColor(img, cv2.COLOR_RGB2YCrCb)
-            ycrcb[:, :, 0] = cv2.equalizeHist(ycrcb[:, :, 0])
+            ycrcb[:, :, 0] = _esitle(ycrcb[:, :, 0])
             out = cv2.cvtColor(ycrcb, cv2.COLOR_YCrCb2RGB)
-    else:  # clahe
+    elif mode == "clahe":
         clahe = cv2.createCLAHE(clipLimit=float(clahe_clip), tileGridSize=(8, 8))
         if is_gray:
             out = clahe.apply(gray)
@@ -460,6 +590,15 @@ def apply_enhancement(pixels: np.ndarray, mode: str, clahe_clip: float = 2.0) ->
             lab = cv2.cvtColor(img, cv2.COLOR_RGB2LAB)
             lab[:, :, 0] = clahe.apply(lab[:, :, 0])
             out = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+    else:  # edge
+        # template-matching tarafındaki EDGE ile birebir aynı: parlaklık
+        # kanalının Laplacian büyüklüğü, tepe değerine göre 0-255'e ölçeklenir.
+        luma = gray if is_gray else cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        edges = np.abs(cv2.Laplacian(luma, cv2.CV_32F))
+        peak = float(edges.max())
+        out = np.zeros_like(luma) if peak <= 0.0 else (edges / peak * 255.0).astype(np.uint8)
+        if not is_gray:
+            out = cv2.cvtColor(out, cv2.COLOR_GRAY2RGB)
 
     # Giriş (H, W, 1) biçimindeyse kanal eksenini koru.
     if pixels.ndim == 3 and pixels.shape[2] == 1 and out.ndim == 2:
@@ -1410,7 +1549,7 @@ class ImageProcessor:
         num_frames_y: int,
         figsize: Tuple[int, int] = (10, 10),
         save_path: Optional[str] = None
-    ) -> plt.Figure:
+    ) -> "Any":
         """
         Parçaları görselleştirir.
         
@@ -1424,6 +1563,10 @@ class ImageProcessor:
         Returns:
             Matplotlib figure objesi
         """
+        # matplotlib yalnizca gorsellestirme icin gerekli; modulun geri kalani
+        # (bolme/birlestirme/jeoreferans/sozlesme) onsuz da calisir.
+        import matplotlib.pyplot as plt
+
         fig, ax = plt.subplots(num_frames_x, num_frames_y, figsize=figsize)
         
         # Tek boyutlu array için düzeltme
@@ -1458,9 +1601,9 @@ class ImageProcessor:
         image_size: Tuple[int, int] = CONFIG["pipeline"]["image_size"],
         color_mode: str = CONFIG["pipeline"]["color_mode"],
         batch_size: int = CONFIG["pipeline"]["batch_size"],
-        normalization: str = "minus1_1",
-        enhancement: str = "none",
-        clahe_clip: float = 2.0
+        normalization: str = "auto",
+        enhancement: str = "auto",
+        clahe_clip: Optional[float] = None
     ) -> List[str]:
         """
         Parçalara bölünmüş görüntüleri sinir ağı modelinden batch inference ile geçirir.
@@ -1477,10 +1620,13 @@ class ImageProcessor:
             color_mode: Renk modu ("grayscale" veya "rgb")
             batch_size: Batch boyutu (GPU VRAM'a göre ayarlayın, varsayılan: 16)
             normalization: Karo girişine uygulanacak normalizasyon
-                ("minus1_1", "zero_1", "raw", "zscore"; bkz. apply_normalization)
+                ("minus1_1", "zero_1", "raw", "zscore"; bkz. apply_normalization).
+                "auto" (varsayılan) ise modelin "<model>.pre.json" sözleşmesinden,
+                sözleşme yoksa "minus1_1"den alınır.
             enhancement: Normalizasyondan önce uygulanacak kontrast/histogram
-                iyileştirmesi ("none", "hist_eq", "clahe"; bkz. apply_enhancement)
-            clahe_clip: CLAHE için kontrast sınırı (clipLimit)
+                iyileştirmesi ("none", "hist_eq", "clahe", "edge";
+                bkz. apply_enhancement). "auto" ise sözleşmeden okunur.
+            clahe_clip: CLAHE için kontrast sınırı (clipLimit). None ise sözleşmeden.
             
         Returns:
             İşlenmiş dosya isimlerinin listesi
@@ -1511,6 +1657,13 @@ class ImageProcessor:
                     logger.warning(f"Eski inference dosyasi silinemedi ({old_path}): {e}")
 
         
+        # Girdi ön işlemesi: "auto" alanları modelin sözleşmesinden doldur.
+        # Böylece model dosyası nereye kopyalanırsa kopyalansın aynı ön işlemeyi
+        # taşır; template-matching tarafı da aynı dosyayı okur.
+        normalization, enhancement, clahe_clip = resolve_preprocessing(
+            model_path, normalization, enhancement, clahe_clip
+        )
+
         # Modeli yukle (farkli Keras surumleri icin uyumluluk fallback'leri ile)
         logger.info(f"Model yukleniyor: {model_path}")
 
@@ -1651,6 +1804,10 @@ class ImageProcessor:
             logger.info(f"Görüntü iyileştirme: CLAHE (clipLimit={clahe_clip})")
         elif enhancement == "hist_eq":
             logger.info("Görüntü iyileştirme: histogram eşitleme")
+        elif enhancement == "hist_eq_pil":
+            logger.info("Görüntü iyileştirme: histogram eşitleme (PIL/tfa uyumlu)")
+        elif enhancement == "edge":
+            logger.info("Görüntü iyileştirme: Laplacian kenar haritası")
         else:
             logger.info("Görüntü iyileştirme: yok")
 
@@ -1821,10 +1978,10 @@ class ImageProcessor:
         image_size: Tuple[int, int] = CONFIG["pipeline"]["image_size"],
         color_mode: str = CONFIG["pipeline"]["color_mode"],
         batch_size: int = CONFIG["pipeline"]["batch_size"],
-        normalization: str = "minus1_1",
+        normalization: str = "auto",
         auto_reference: bool = True,
-        enhancement: str = "none",
-        clahe_clip: float = 2.0
+        enhancement: str = "auto",
+        clahe_clip: Optional[float] = None
     ) -> Dict[str, Any]:
         """
         Tüm işlemleri sırayla çalıştırır: Böl -> Model Inference -> Birleştir -> Jeoreferansla
@@ -2043,6 +2200,11 @@ class ImageProcessor:
                                 else:
                                     model_output_dir = os.path.join(processed_output_dir, image_folder_name, model_name)
                                 
+                                # Etkin ön işlemeyi burada çöz ki üretilen haritanın
+                                # yanına aynen yazabilelim (template-matching okur).
+                                eff_norm, eff_enh, eff_clip = resolve_preprocessing(
+                                    model_path_full, normalization, enhancement, clahe_clip
+                                )
                                 processed_files = self.process_images_with_model(
                                     input_dir=split_output_dir_with_name,  # Görüntü adıyla klasör
                                     output_dir=model_output_dir,
@@ -2050,16 +2212,24 @@ class ImageProcessor:
                                     image_size=image_size,
                                     color_mode=color_mode,
                                     batch_size=batch_size,
-                                    normalization=normalization,
-                                    enhancement=enhancement,
-                                    clahe_clip=clahe_clip
+                                    normalization=eff_norm,
+                                    enhancement=eff_enh,
+                                    clahe_clip=eff_clip
                                 )
                                 self._write_pipeline_metadata(model_output_dir, metadata)
                                 
                                 results['inference'].append({
                                     'model': model_name,
                                     'output_dir': model_output_dir,
-                                    'num_processed': len(processed_files)
+                                    'num_processed': len(processed_files),
+                                    'preprocessing': {
+                                        'input_normalization': eff_norm,
+                                        'enhancement': eff_enh,
+                                        'clahe_clip': eff_clip,
+                                        'color_mode': color_mode,
+                                        'image_size': int(image_size[0]),
+                                        'model': model_name,
+                                    },
                                 })
                                 
                                 logger.info(f"✓ Model {model_name} tamamlandı")
@@ -2078,6 +2248,11 @@ class ImageProcessor:
                     else:
                         model_output_dir = os.path.join(processed_output_dir, image_folder_name, model_name)
                     
+                    # Etkin ön işlemeyi burada çöz ki üretilen haritanın yanına
+                    # aynen yazabilelim (template-matching okur).
+                    eff_norm, eff_enh, eff_clip = resolve_preprocessing(
+                        model_path, normalization, enhancement, clahe_clip
+                    )
                     processed_files = self.process_images_with_model(
                         input_dir=split_output_dir_with_name,  # Görüntü adıyla klasör
                         output_dir=model_output_dir,
@@ -2085,16 +2260,24 @@ class ImageProcessor:
                         image_size=image_size,
                         color_mode=color_mode,
                         batch_size=batch_size,
-                        normalization=normalization,
-                        enhancement=enhancement,
-                        clahe_clip=clahe_clip
+                        normalization=eff_norm,
+                        enhancement=eff_enh,
+                        clahe_clip=eff_clip
                     )
                     self._write_pipeline_metadata(model_output_dir, metadata)
                     
                     results['inference'].append({
                         'model': model_name,
                         'output_dir': model_output_dir,
-                        'num_processed': len(processed_files)
+                        'num_processed': len(processed_files),
+                        'preprocessing': {
+                            'input_normalization': eff_norm,
+                            'enhancement': eff_enh,
+                            'clahe_clip': eff_clip,
+                            'color_mode': color_mode,
+                            'image_size': int(image_size[0]),
+                            'model': model_name,
+                        },
                     })
                     
                     logger.info(f"✓ Model inference tamamlandı")
@@ -2143,6 +2326,19 @@ class ImageProcessor:
                         'model': model_name,
                         'output_file': merge_output_file
                     })
+
+                    # Haritanın hangi ön işlemeyle üretildiğini haritanın YANINA yaz.
+                    # Template-matching bu dosyayı okuyup anlık görüntüyü AYNI
+                    # ayarlarla işler; iki taraf ancak böyle karşılaştırılabilir olur.
+                    prep = inference_result.get('preprocessing')
+                    if prep:
+                        sidecar = save_preprocessing_sidecar(
+                            merge_output_file,
+                            produced_by="goruntu_islemleri.run_full_pipeline",
+                            source_image=os.path.basename(input_image),
+                            **prep
+                        )
+                        logger.info(f"✓ Harita ön işleme sözleşmesi: {sidecar}")
                     
                     logger.info(f"✓ Birleştirme tamamlandı: {merge_output_file}")
             else:
@@ -2295,6 +2491,12 @@ class ImageProcessor:
                             transform_grid_shape=georef_transform_grid_shape,
                         )
                         
+                        # Sözleşmeyi jeoreferanslı çıktının yanına da taşı; template-matching
+                        # doğrudan bu GeoTIFF'i kullandığı için asıl gereken kopya budur.
+                        merge_contract = load_preprocessing_sidecar(merge_file)
+                        if merge_contract:
+                            save_preprocessing_sidecar(georef_output_file, **merge_contract)
+
                         results['georef'].append({
                             'input': merge_file,
                             'output': georef_output_file,
@@ -2549,6 +2751,8 @@ Ornekler:
                     metadata['num_frames_x'],
                     metadata['num_frames_y']
                 )
+                import matplotlib.pyplot as plt
+
                 plt.show()
 
             logger.info("Bolme islemi tamamlandi!")
