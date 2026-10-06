@@ -62,6 +62,13 @@ class Config:
     
     # Random seed (tekrarlanabilirlik için)
     RANDOM_SEED = 42
+
+    # Egitim ornek sirasini her epoch yeniden karistir.
+    # False iken yollar yalniz bir kez (RANDOM_SEED ile) karistirilir ve her
+    # epoch AYNI sirayla dolasilir. 2022'de benchmark'i kazanan modeller
+    # model.fit(numpy, shuffle=True) ile, yani her epoch karistirilarak
+    # egitildi; BATCH_SIZE=1'de sira SGD yorungesini dogrudan belirler.
+    SHUFFLE_TRAIN = True
     
     # ------------------------------ MODEL AYARLARI ----------------------------
     # Görüntü boyutu (genişlik ve yükseklik eşit olmalı)
@@ -860,6 +867,11 @@ def create_datasets():
     
     # Dataset oluştur - ignore_errors ile bozuk dosyaları atla
     train_dataset = tf.data.Dataset.from_tensor_slices(train_paths)
+    if Config.SHUFFLE_TRAIN:
+        # Yollar karistirilir (goruntu degil), bu yuzden tam tampon ucuzdur.
+        train_dataset = train_dataset.shuffle(
+            len(train_paths), seed=Config.RANDOM_SEED, reshuffle_each_iteration=True
+        )
     train_dataset = train_dataset.map(preprocess_fn, num_parallel_calls=parallel_calls)
     train_dataset = train_dataset.apply(tf.data.experimental.ignore_errors())  # Hataları atla
     if Config.FILTER_EMPTY_TILES:
@@ -1625,6 +1637,7 @@ def print_config():
     print(f"  Loss:               {Config.LOSS_FUNCTION}")
     print(f"  Train/Val Split:    {Config.TRAIN_SPLIT}/{1-Config.TRAIN_SPLIT}")
     print(f"  Random Seed:        {Config.RANDOM_SEED}")
+    print(f"  Epoch Karistirma:   {Config.SHUFFLE_TRAIN}")
     print("=" * 60 + "\n")
 
 
