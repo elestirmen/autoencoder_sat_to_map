@@ -1,0 +1,30 @@
+cff-version: 1.2.0
+message: >-
+  If you use this software, please cite the article below.
+title: >-
+  Map Generation from Satellite Imagery (Cross-Autoencoder Training and Inference)
+type: software
+version: 1.0.0
+date-released: 2026-09-16
+license: MIT
+authors:
+  - family-names: "Arık"
+    given-names: "Ahmet Ertuğrul"
+    affiliation: "Department of Information Systems and Technologies, Kapadokya University, Nevşehir, Türkiye; KÜN Geospatial AI & UAV Lab"
+    email: "ertugrul.arik@kapadokya.edu.tr"
+preferred-citation:
+  type: article
+  title: >-
+    Learned versus Classical Structural Representations for GNSS-Denied UAV
+    Localization by Template Matching: A Cross-Source Map Benchmark and
+    Flight Replay
+  authors:
+    - family-names: "Arık"
+      given-names: "Ahmet Ertuğrul"
+      affiliation: "Kapadokya University, Nevşehir, Türkiye"
+    - family-names: "Emrahoğlu"
+      given-names: "Nuri"
+      affiliation: "Çukurova University, Adana, Türkiye"
+  journal: "International Journal of Engineering and Geosciences"
+  year: 2026
+  notes: "Submitted; citation details will be updated upon publication."

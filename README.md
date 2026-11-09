@@ -1,5 +1,7 @@
 # Map Generation from Satellite Imagery
 
+> **Article:** A. E. Arık and N. Emrahoğlu, *Learned versus Classical Structural Representations for GNSS-Denied UAV Localization by Template Matching: A Cross-Source Map Benchmark and Flight Replay*, submitted to the *International Journal of Engineering and Geosciences* (IJEG), 2026. To cite this code, see [CITATION.cff](CITATION.cff).
+
 Academic research software developed for autoencoder-based image-to-image translation, large raster processing with tiling, and GeoTIFF output generation.
 
 > **Project status:** Research prototype. The code supports the data preparation, model training, and inference workflow; however, this repository does not include a published dataset, trained model weights, or a final benchmark table.
@@ -414,7 +416,7 @@ The generated maps should not be used in navigation, disaster management, cadast
 
 ## Citation
 
-There is no `CITATION.cff`, DOI, or definitive bibliographic record for a publication for this repository yet. In academic use, at least the repository URL and the commit ID used should be stated:
+See [CITATION.cff](CITATION.cff) and the article named at the top of this file. Until the article is published, at least the repository URL and the commit ID used should be stated:
 
 ```text
 autoencoder_sat_to_map. Map generation from satellite imagery research software.

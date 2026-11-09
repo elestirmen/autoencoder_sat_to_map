@@ -1,5 +1,7 @@
 # Uydu Görüntüsünden Harita Üretimi
 
+> **Makale:** A. E. Arık ve N. Emrahoğlu, *Learned versus Classical Structural Representations for GNSS-Denied UAV Localization by Template Matching: A Cross-Source Map Benchmark and Flight Replay*, *International Journal of Engineering and Geosciences* (IJEG) dergisine gönderildi, 2026. Atıf için [CITATION.cff](CITATION.cff) dosyasına bakın.
+
 Otoenkoder tabanlı görüntü-görüntü dönüşümü, karo tabanlı büyük raster işleme ve
 GeoTIFF çıktı üretimi için geliştirilen akademik araştırma yazılımı.
 
@@ -518,9 +520,9 @@ güvenlik veya diğer yüksek riskli operasyonel kararlarda kullanılmamalıdır
 
 ## Atıf
 
-Bu depo için henüz bir `CITATION.cff`, DOI veya yayına ait kesin bibliyografik
-kayıt bulunmamaktadır. Akademik kullanımda en azından depo adresi ve kullanılan
-commit kimliği belirtilmelidir:
+[CITATION.cff](CITATION.cff) dosyasına ve bu dosyanın başındaki makaleye bakın.
+Makale yayımlanana kadar en azından depo adresi ve kullanılan commit kimliği
+belirtilmelidir:
 
 ```text
 autoencoder_sat_to_map. Uydu görüntüsünden harita üretimi araştırma yazılımı.
