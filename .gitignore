@@ -16,3 +16,9 @@
 !*.XLSX
 !*.docx
 !*.DOCX
+
+# Lisans ve atif dosyalari
+!LICENSE-MIT
+!LICENSE-APACHE
+!CITATION.cff
+!.zenodo.json

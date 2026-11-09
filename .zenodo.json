@@ -1,0 +1,20 @@
+{
+  "title": "Map Generation from Satellite Imagery (Cross-Autoencoder Training and Inference)",
+  "description": "Training-side companion code of the article 'Learned versus Classical Structural Representations for GNSS-Denied UAV Localization by Template Matching: A Cross-Source Map Benchmark and Flight Replay' (submitted to the International Journal of Engineering and Geosciences): data preparation from paired satellite-cartographic imagery, configurable autoencoder/U-Net training, tile-based batch inference, lossless mosaicking and georeferenced GeoTIFF output. Dual-licensed MIT / Apache-2.0.",
+  "upload_type": "software",
+  "license": "mit",
+  "creators": [
+    {
+      "name": "Arık, Ahmet Ertuğrul",
+      "affiliation": "Kapadokya University, Nevşehir, Türkiye"
+    }
+  ],
+  "keywords": [
+    "GNSS-denied navigation",
+    "UAV localization",
+    "cross-autoencoder",
+    "template matching",
+    "remote sensing"
+  ],
+  "language": "eng"
+}
