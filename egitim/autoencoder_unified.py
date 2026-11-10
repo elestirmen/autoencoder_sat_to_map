@@ -56,6 +56,12 @@ class Config:
 
     # Cikis renk modu: "auto" (giris ile ayni), "grayscale", "rgb"
     OUTPUT_COLOR_MODE = "grayscale"
+
+    # Egitim hedefi: "map" (kartografik harita karosu, varsayilan) veya
+    # "reconstruction" (girdinin kendisi; kontrollu karsilastirma icin).
+    # "reconstruction" modunda bos-karo filtresi yine HARITA etiketiyle
+    # uygulanir, boylece iki mod tam olarak ayni egitim karolarini gorur.
+    TARGET_MODE = "map"
     
     # Eğitim/Doğrulama oranı (0.0 - 1.0 arası, eğitim için kullanılacak oran)
     TRAIN_SPLIT = 0.9
@@ -306,6 +312,7 @@ def preprocessing_contract():
         "output_activation": Config.OUTPUT_ACTIVATION,
         "output_color_mode": "rgb" if get_output_channels() == 3 else "grayscale",
         "trained_by": "autoencoder_unified.py",
+        "target_mode": getattr(Config, "TARGET_MODE", "map"),
     }
 
 
@@ -646,6 +653,19 @@ def load_and_preprocess_multiscale(image_path):
     return (input_img, label_img)
 
 
+def to_reconstruction_target(input_img, label_img):
+    """TARGET_MODE="reconstruction": hedef = girdinin kendisi (cikis araligina olceklenmis)."""
+    del label_img
+    if get_input_normalization() == "zero_1":
+        pixels = input_img * 255.0
+    else:
+        pixels = (input_img + 1.0) * 127.5
+    low, high = get_target_range()
+    target = normalize_to_range(pixels, low, high)
+    target = convert_channels(target, get_input_channels(), get_output_channels())
+    return (input_img, target)
+
+
 def keep_informative_tile(input_img, label_img):
     """Hedefte tamamen/neredeyse tamamen bos (beyaz) karolari eler."""
     del input_img  # Sadece hedef etiket dagilimi kullanilir.
@@ -876,6 +896,8 @@ def create_datasets():
     train_dataset = train_dataset.apply(tf.data.experimental.ignore_errors())  # Hataları atla
     if Config.FILTER_EMPTY_TILES:
         train_dataset = train_dataset.filter(keep_informative_tile)
+    if getattr(Config, "TARGET_MODE", "map") == "reconstruction":
+        train_dataset = train_dataset.map(to_reconstruction_target, num_parallel_calls=parallel_calls)
     train_dataset = train_dataset.batch(batch_size).prefetch(buffer_size=prefetch_buffer)
     
     val_dataset = tf.data.Dataset.from_tensor_slices(val_paths)
@@ -883,6 +905,8 @@ def create_datasets():
     val_dataset = val_dataset.apply(tf.data.experimental.ignore_errors())  # Hataları atla
     if Config.FILTER_EMPTY_TILES and Config.FILTER_EMPTY_TILES_ON_VAL:
         val_dataset = val_dataset.filter(keep_informative_tile)
+    if getattr(Config, "TARGET_MODE", "map") == "reconstruction":
+        val_dataset = val_dataset.map(to_reconstruction_target, num_parallel_calls=parallel_calls)
     val_dataset = val_dataset.batch(Config.BATCH_SIZE).prefetch(buffer_size=prefetch_buffer)
     
     return train_dataset, val_dataset
